@@ -915,7 +915,7 @@ Try doing `sudo adduser folk render`."
         set cc [c create]
         $cc typedef int sampler2D
         $cc struct vec2 { float x; float y; }
-        $cc struct vec3 { float x; float y; float z; }
+        $cc struct vec3 { float x; float y; float z; float padding; }
         $cc struct vec4 { float x; float y; float z; float w; }
         $cc struct uvec4 { uint32_t x; uint32_t y; uint32_t z; uint32_t w; }
 
@@ -939,7 +939,7 @@ Try doing `sudo adduser folk render`."
                 double x; __ENSURE_OK(Tcl_GetDoubleFromObj(interp, $[set argname]_objv[0], &x));
                 double y; __ENSURE_OK(Tcl_GetDoubleFromObj(interp, $[set argname]_objv[1], &y));
                 double z; __ENSURE_OK(Tcl_GetDoubleFromObj(interp, $[set argname]_objv[2], &z));
-                $argname = (vec3) { (float)x, (float)y, (float)z };
+                $argname = (vec3) { (float)x, (float)y, (float)z, (float)0.0 };
             }
         }
         $cc argtype vec4 {
