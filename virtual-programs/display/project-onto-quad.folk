@@ -1,31 +1,75 @@
-Wish the GPU compiles pipeline "projectedFillTriangle" {
-    {vec2 p0 vec2 p1 vec2 p2 vec4 color \
-     float fx float fy float s float cx float cy float k1 float k2 vec3 quadIHat vec3 quadJHat vec3 quadT \
-     fn planeUvToXy fn projectXyOnPlane} {
-        mat3 intrinsics = mat3(
-            fx, 0.0, 0.0,
-            s,   fy, 0.0,
-            cx,  cy, 1.0
-        );
-        vec2 k = vec2(k1, k2);
+proc mixinProjection {pipeline} {
+    if {[llength $pipeline] == 3} {
+        lassign $pipeline vertArgs vertBody fragBody
+        set fragArgs [list]
+    } elseif {[llength $pipeline] == 4} {
+        lassign $pipeline vertArgs vertBody fragArgs fragBody
+    } else {
+        error {Wrong number of args}
+    }
 
-        mat3 quadR = mat3(
-            quadIHat, quadJHat, cross(quadIHat, quadJHat)
-        );
+    # Vertex shader args
+    # intrinsics
+    lappend vertArgs float fx float fy float s float cx float cy float k1 float k2
+    # quad R and T
+    lappend vertArgs vec3 quadIHat vec3 quadJHat vec3 quadT
+    # needed functions
+    lappend vertArgs fn planeUvToXy
 
+    # Fragment shader args
+    # needed functions
+    lappend fragArgs fn projectXyOnPlane
+
+    # Vertex shader code
+    set vertBody [join [list \
+        $vertBody \
+        {
+            mat3 intrinsics = mat3(
+                fx, 0.0, 0.0,
+                s,   fy, 0.0,
+                cx,  cy, 1.0
+            );
+            vec2 k = vec2(k1, k2);
+
+            mat3 quadR = mat3(
+                quadIHat, quadJHat, cross(quadIHat, quadJHat)
+            );
+
+            return planeUvToXy(result, intrinsics, k, quadR, quadT);
+        }] "\n"]
+
+    # Fragment shader code
+    set fragBody [join [list \
+        {
+            mat3 intrinsics = mat3(
+                fx, 0.0, 0.0,
+                s,   fy, 0.0,
+                cx,  cy, 1.0
+            );
+            vec2 k = vec2(k1, k2);
+
+            mat3 quadR = mat3(
+                quadIHat, quadJHat, cross(quadIHat, quadJHat)
+            );
+
+            vec2 onPlane = projectXyOnPlane(gl_FragCoord.xy, intrinsics, k, quadR, quadT);
+        } \
+        $fragBody] "\n"]
+
+    return [list $vertArgs $vertBody $fragArgs $fragBody]
+}
+
+Wish the GPU compiles pipeline "projectedFillTriangle" [mixinProjection {
+    {vec2 p0 vec2 p1 vec2 p2 vec4 color} {
         vec2 vertices[4] = vec2[4](p0, p1, p2, p0);
-        vec2 p = vertices[gl_VertexIndex];
-
-        return planeUvToXy(p, intrinsics, k, quadR, quadT);
+        vec2 result = vertices[gl_VertexIndex]; // used by mixin
     } {
         return color;
     }
-}
+}]
 
-Wish the GPU compiles pipeline "projectedCircle" {
-    {vec2 center float radius float thickness vec4 color int filled \
-     float fx float fy float s float cx float cy float k1 float k2 vec3 quadIHat vec3 quadJHat vec3 quadT \
-     fn planeUvToXy fn projectXyOnPlane} {
+Wish the GPU compiles pipeline "projectedCircle" [mixinProjection {
+    {vec2 center float radius float thickness vec4 color int filled} {
         // my code
         float r = radius + thickness;
         vec2 vertices[4] = vec2[4](
@@ -34,37 +78,9 @@ Wish the GPU compiles pipeline "projectedCircle" {
             vec2(center.x - r, center.y + r),
             center + r
         );
-        vec2 result = vertices[gl_VertexIndex];
-
-        // projection code
-        mat3 intrinsics = mat3(
-            fx, 0.0, 0.0,
-            s,   fy, 0.0,
-            cx,  cy, 1.0
-        );
-        vec2 k = vec2(k1, k2);
-
-        mat3 quadR = mat3(
-            quadIHat, quadJHat, cross(quadIHat, quadJHat)
-        );
-
-        return planeUvToXy(result, intrinsics, k, quadR, quadT);
-    } {fn projectXyOnPlane} {
-        // projection code
-        mat3 intrinsics = mat3(
-            fx, 0.0, 0.0,
-            s,   fy, 0.0,
-            cx,  cy, 1.0
-        );
-        vec2 k = vec2(k1, k2);
-
-        mat3 quadR = mat3(
-            quadIHat, quadJHat, cross(quadIHat, quadJHat)
-        );
-
-        vec2 onPlane = projectXyOnPlane(gl_FragCoord.xy, intrinsics, k, quadR, quadT);
-
-        // my code
+        vec2 result = vertices[gl_VertexIndex]; // used by mixin
+    } {
+        // onPlane provided by mixin
         float dist = length(onPlane - center) - radius;
         if (filled == 1) {
             return (dist < thickness) ? color : vec4(0, 0, 0, 0);
@@ -72,7 +88,7 @@ Wish the GPU compiles pipeline "projectedCircle" {
             return (dist < thickness && dist > 0.0) ? color : vec4(0, 0, 0, 0);
         }
     }
-}
+}]
 
 proc intrinsicsToList {intrinsics} {
     dict with intrinsics {
