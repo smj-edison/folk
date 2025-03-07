@@ -46,3 +46,121 @@ Wish the GPU compiles function "invBilinear" {{vec2 p vec2 a vec2 b vec2 c vec2 
     }
     return res;
 }}
+
+# project onto quad and helper functions
+Wish the GPU compiles function "distort" {{vec2 p mat3 intr vec2 k} vec2 {
+    float fx = intr[0][0];
+    float fy = intr[1][1];
+    float cx = intr[2][0]; float cy = intr[2][1];
+
+    float k1 = k[0];
+    float k2 = k[1];
+
+    float x = (p.x - cx)/fx;
+    float y = (p.y - cy)/fy;
+    float r2 = x*x + y*y;
+    float D = k1 * r2 + k2 * r2*r2;
+
+    return vec2(
+        (x * (1.0 + D))*fx + cx,
+        (y * (1.0 + D))*fy + cy
+    );
+}}
+
+Wish the GPU compiles function "undistort" {{vec2 p mat3 intr vec2 k} vec2 {
+    float fx = intr[0][0];
+    float fy = intr[1][1];
+    float cx = intr[2][0]; float cy = intr[2][1];
+
+    float k1 = k[0];
+    float k2 = k[1];
+
+    float x = (p.x - cx)/fx;
+    float y = (p.y - cy)/fy;
+
+    for (int i = 0; i < 3; i++) {
+        float r2 = x*x + y*y;
+        float rad = 1.0 + k1 * r2 + k2 * r2*r2;
+        x /= rad; y /= rad;
+    }
+
+    return vec2(x*fx + cx, y*fy + cy);
+}}
+
+# https://samsymons.com/blog/math-notes-ray-plane-intersection/
+Wish the GPU compiles function "rayPlaneIntersection" {
+    {vec3 rayOrigin vec3 rayDirection vec3 planeCenter vec3 planeNormal} vec3 {
+        float denom = dot(planeNormal, rayDirection);
+
+        // 0.0001 is an arbitrary epsilon value. We just want
+        // to avoid working with intersections that are almost
+        // orthogonal.
+        if (abs(denom) > 0.0001) {
+            vec3 difference = planeCenter - rayOrigin;
+            float t = dot(difference, planeNormal) / denom;
+
+            // we assume there will be an intersection, but if not, set t to 0
+            t = max(t, 0.0);
+
+            return rayOrigin + t*rayDirection;
+        } else {
+            return rayOrigin;
+        }
+    }
+}
+
+# https://stackoverflow.com/questions/34576418/does-glsl-have-a-built-in-bilinear-interpolation-function
+Wish the GPU compiles function "bilinear" {
+    {vec2 uv vec3 a vec3 b vec3 c vec3 d} vec3 {
+        vec3 x = mix(a, b, uv.x);
+        vec3 y = mix(d, c, uv.x);
+        return mix(x, y, uv.y);
+    }
+}
+
+Wish the GPU compiles function "planeUvToXy" {
+    {vec2 uv mat3 intr vec2 k mat3 quadR vec3 quadT fn distort fn bilinear} vec2 {
+        vec3 topLeft     = quadR*vec3(0.0, 0.0, 0.0) + quadT;
+        vec3 topRight    = quadR*vec3(1.0, 0.0, 0.0) + quadT;
+        vec3 bottomRight = quadR*vec3(1.0, 1.0, 0.0) + quadT;
+        vec3 bottomLeft  = quadR*vec3(0.0, 1.0, 0.0) + quadT;
+
+        vec3 point = bilinear(uv, topLeft, topRight, bottomRight, bottomLeft);
+        point /= point.z;
+
+        vec3 undistorted = intr * point;
+        return distort(vec2(undistorted), intr, k);
+    }
+}
+
+# p is in [0, width], [0, height]
+Wish the GPU compiles function "projectXyOnPlane" {
+    {vec2 p mat3 intr vec2 k mat3 quadR vec3 quadT \
+     fn undistort fn rayPlaneIntersection fn invBilinear} vec2 {
+        vec3 undistorted = vec3(undistort(p, intr, k), 1.0);
+
+        mat3 intrInv = inverse(intr);
+        vec3 ray = intrInv * undistorted;
+        ray /= length(ray); // normalize ray (is this necessary?)
+
+        // k hat in quadR _is_ the normal (well, after we've flipped it anyways since quadR is a rotation matrix,
+        // not a normal)
+        vec3 planeNormal = -quadR[2];
+        vec3 planeCenter = quadT;
+
+        vec3 intersection = rayPlaneIntersection(vec3(0.0), ray, planeCenter, planeNormal);
+
+        vec3 topLeft     = quadR*vec3(0.0, 0.0, 0.0) + quadT;
+        vec3 topRight    = quadR*vec3(1.0, 0.0, 0.0) + quadT;
+        vec3 bottomRight = quadR*vec3(1.0, 1.0, 0.0) + quadT;
+        vec3 bottomLeft  = quadR*vec3(0.0, 1.0, 0.0) + quadT;
+        
+        return invBilinear(
+            vec2(intersection),
+            vec2(topLeft),
+            vec2(topRight),
+            vec2(bottomRight),
+            vec2(bottomLeft)
+        );
+    }
+}
