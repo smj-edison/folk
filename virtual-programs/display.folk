@@ -845,17 +845,33 @@ Try doing `sudo adduser folk render`."
         return [list $fnArgs $depFnDict $rtype $body]
     }
 
+    # recursively get a list of all the sub-function names
+    proc flattenNestedFunctions {depFnDict} {
+        set fnNames [list]
+
+        dict for {name value} $depFnDict {
+             lassign $value args deps
+             lappend fnNames $name
+             set fnNames [concat $fnNames [flattenNestedFunctions $deps]]
+        }
+
+        # remove duplicates
+        set fnNames [lsort -unique $fnNames]
+
+        return $fnNames
+    }
+
     # Construct a shader pipeline that can be used to draw to the
     # screen.
     variable nextPipelineId 0
     proc pipeline {args} {
-        if {[llength $args] == 3} {
-            lassign $args vertArgs vertBody fragBody
+        if {[llength $args] == 4} {
+            lassign $args fns vertArgs vertBody fragBody
             set fragArgs [list]
-        } elseif {[llength $args] == 4} {
-            lassign $args vertArgs vertBody fragArgs fragBody
+        } elseif {[llength $args] == 5} {
+            lassign $args fns vertArgs vertBody fragArgs fragBody
         } else {
-            error {Gpu::pipeline: should be used as [Gpu::pipeline vertArgs vertBody fragBody], or [Gpu::pipeline vertArgs vertBody fragArgs fragBody]}
+            error {Gpu::pipeline: should be used as [Gpu::pipeline fns vertArgs vertBody fragBody], or [Gpu::pipeline fns vertArgs vertBody fragArgs fragBody]}
         }
         set vertFnDict [dict create]
         set fragFnDict [dict create]
@@ -864,11 +880,16 @@ Try doing `sudo adduser folk render`."
         foreach {argtype argname} $vertArgs {
             if {$argtype eq "fn"} {
                 # TODO: Support fn being a list {name fn}.
-                if {![uplevel [list info exists $argname]]} {
+                if {![dict exists $fns $argname]} {
                     throw [list FN_NOT_FOUND $argname] "Gpu::pipeline: $argname not found"
                 }
-                set fn [uplevel [list set $argname]]
-                set vertFnDict [dict merge $vertFnDict [lindex $fn 1]]
+                set fn [dict get $fns $argname]
+                set depList [flattenNestedFunctions [lindex $fn 1]]
+
+                foreach dep $depList {
+                    # grab dependency from fns
+                    dict set vertFnDict $dep [dict get $fns $dep]
+                }
                 dict set vertFnDict [string map {: ""} $argname] $fn
                 continue
             }
@@ -877,10 +898,10 @@ Try doing `sudo adduser folk render`."
         foreach {argtype argname} $fragArgs {
             if {$argtype eq "fn"} {
                 # TODO: Support fn being a list {name fn}.
-                if {![uplevel [list info exists $argname]]} {
+                if {![dict exists $fns $argname]} {
                     throw [list FN_NOT_FOUND $argname] "Gpu::pipeline: $argname not found"
                 }
-                set fn [uplevel [list set $argname]]
+                set fn [dict get $fns $argname]
                 set fragFnDict [dict merge $fragFnDict [lindex $fn 1]]
                 dict set fragFnDict [string map {: ""} $argname] $fn
                 continue
@@ -1682,9 +1703,7 @@ Start-display-process {
         set ::pipelines [dict create]
         proc ::tryCompilePipeline {wisher name source} {
             try {
-                dict with ::fns {
-                    dict set ::pipelines $name [Gpu::pipeline {*}$source]
-                }
+                dict set ::pipelines $name [Gpu::pipeline $::fns {*}$source]
             } trap {FN_NOT_FOUND} {} {
                 set notFoundName [lindex $::errorCode 1]
                 When the GPU compiles function $notFoundName to /anything/ {
