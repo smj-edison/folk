@@ -902,7 +902,13 @@ Try doing `sudo adduser folk render`."
                     throw [list FN_NOT_FOUND $argname] "Gpu::pipeline: $argname not found"
                 }
                 set fn [dict get $fns $argname]
-                set fragFnDict [dict merge $fragFnDict [lindex $fn 1]]
+
+                set depList [flattenNestedFunctions [lindex $fn 1]]
+
+                foreach dep $depList {
+                    # grab dependency from fns
+                    dict set fragFnDict $dep [dict get $fns $dep]
+                }
                 dict set fragFnDict [string map {: ""} $argname] $fn
                 continue
             } else {
@@ -1742,7 +1748,7 @@ Start-display-process {
                 } on error e {
                     # FIXME: it's hard to report an error here, since this
                     # runs every frame.
-                    puts stderr "display.folk: Error: [dict get $match wisher]: $e\n$::errorInfo"
+                    # puts stderr "display.folk: Error: [dict get $match wisher]: $e\n$::errorInfo"
                 }
             }
 
