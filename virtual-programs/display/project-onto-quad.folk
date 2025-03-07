@@ -1,101 +1,9 @@
-proc mixinProjection {pipeline} {
-    if {[llength $pipeline] == 3} {
-        lassign $pipeline vertArgs vertBody fragBody
-        set fragArgs [list]
-    } elseif {[llength $pipeline] == 4} {
-        lassign $pipeline vertArgs vertBody fragArgs fragBody
-    } else {
-        error {Wrong number of args}
-    }
-
-    # Vertex shader args
-    # intrinsics
-    lappend vertArgs float fx float fy float s float cx float cy float k1 float k2
-    # quad R and T
-    lappend vertArgs vec3 quadIHat vec3 quadJHat vec3 quadT
-    # needed functions
-    lappend vertArgs fn planeUvToXy
-
-    # Fragment shader args
-    # needed functions
-    lappend fragArgs fn projectXyOnPlane
-
-    # Vertex shader code
-    set vertBody [join [list \
-        $vertBody \
-        {
-            mat3 intrinsics = mat3(
-                fx, 0.0, 0.0,
-                s,   fy, 0.0,
-                cx,  cy, 1.0
-            );
-            vec2 k = vec2(k1, k2);
-
-            mat3 quadR = mat3(
-                quadIHat, quadJHat, cross(quadIHat, quadJHat)
-            );
-
-            return planeUvToXy(result, intrinsics, k, quadR, quadT);
-        }] "\n"]
-
-    # Fragment shader code
-    set fragBody [join [list \
-        {
-            mat3 intrinsics = mat3(
-                fx, 0.0, 0.0,
-                s,   fy, 0.0,
-                cx,  cy, 1.0
-            );
-            vec2 k = vec2(k1, k2);
-
-            mat3 quadR = mat3(
-                quadIHat, quadJHat, cross(quadIHat, quadJHat)
-            );
-
-            vec2 onPlane = projectXyOnPlane(gl_FragCoord.xy, intrinsics, k, quadR, quadT);
-        } \
-        $fragBody] "\n"]
-
-    return [list $vertArgs $vertBody $fragArgs $fragBody]
-}
-
-Wish the GPU compiles pipeline "projectedFillTriangle" [mixinProjection {
-    {vec2 p0 vec2 p1 vec2 p2 vec4 color} {
-        vec2 vertices[4] = vec2[4](p0, p1, p2, p0);
-        vec2 result = vertices[gl_VertexIndex]; // used by mixin
-    } {
-        return color;
-    }
-}]
-
-Wish the GPU compiles pipeline "projectedCircle" [mixinProjection {
-    {vec2 center float radius float thickness vec4 color int filled} {
-        // my code
-        float r = radius + thickness;
-        vec2 vertices[4] = vec2[4](
-            center - r,
-            vec2(center.x + r, center.y - r),
-            vec2(center.x - r, center.y + r),
-            center + r
-        );
-        vec2 result = vertices[gl_VertexIndex]; // used by mixin
-    } {
-        // onPlane provided by mixin
-        float dist = length(onPlane - center) - radius;
-        if (filled == 1) {
-            return (dist < thickness) ? color : vec4(0, 0, 0, 0);
-        } else {
-            return (dist < thickness && dist > 0.0) ? color : vec4(0, 0, 0, 0);
-        }
-    }
-}]
-
 proc intrinsicsToList {intrinsics} {
     dict with intrinsics {
         return [list $fx $fy $s $cx $cy $k1 $k2]
     }
 }
-# Wish to draw a triangle on 5 with p0 {-0.05 -0.05} p1 {0.05 -0.05} p2 {0.0 0.05} color red
+
 When display /display/ has intrinsics /intr/ &\
      tag /tag/ has quad /q/ {
     # TODO: ensure tag is on the right display
@@ -113,27 +21,4 @@ When display /display/ has intrinsics /intr/ &\
     set projectArgs [list {*}$intrinsicsList [lindex $RTransposed 0] [lindex $RTransposed 1] $displayT]
 
     Claim tag $tag has projected arguments $projectArgs
-}
-
-When /someone/ wishes to draw a triangle on /tag/ with /...options/ &\
-     tag /tag/ has projected arguments /projectArgs/ {
-    dict with options {
-        if {![info exists layer]} { set layer 0 }
-        Wish the GPU draws pipeline "projectedFillTriangle" with arguments \
-            [list $p0 $p1 $p2 [getColor $color] {*}$projectArgs] layer $layer
-    }
-}
-
-When /someone/ wishes to draw a circle on /tag/ with /...options/ &\
-     tag /tag/ has projected arguments /projectArgs/ {
-    set center [dict get $options center]
-    set radius [dict get $options radius]
-    set thickness [dict get $options thickness]
-    set color [getColor [dict get $options color]]
-    set filled [dict_getdef $options filled false]
-    set filled [expr {$filled eq false ? 0 : 1}]
-    set layer [dict_getdef $options layer 0]
-
-    Wish the GPU draws pipeline "projectedCircle" with arguments \
-        [list $center $radius $thickness $color $filled {*}$projectArgs] layer $layer
 }
