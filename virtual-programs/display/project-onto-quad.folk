@@ -62,9 +62,7 @@ Wish the GPU compiles pipeline "projectedCircle" {
             quadIHat, quadJHat, cross(quadIHat, quadJHat)
         );
 
-        
-        vec2 inPixels = ((gl_FragCoord.xy + 1.0) / 2.0) * _resolution;
-        vec2 onPlane = projectXyOnPlane(inPixels, intrinsics, k, quadR, quadT);
+        vec2 onPlane = projectXyOnPlane(gl_FragCoord.xy, intrinsics, k, quadR, quadT);
 
         // my code
         float dist = length(onPlane - center) - radius;
