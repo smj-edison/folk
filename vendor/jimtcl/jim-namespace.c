@@ -302,19 +302,19 @@ static int JimNamespaceCmd(Jim_Interp *interp, int argc, Jim_Obj *const *argv)
                     else {
                         objPtr = interp->framePtr->nsObj;
                     }
-                    if (Jim_Length(objPtr) == 0 || Jim_CompareStringImmediate(interp, objPtr, "::")) {
+                    if (Jim_Length(interp, objPtr) == 0 || Jim_CompareStringImmediate(interp, objPtr, "::")) {
                         return JIM_OK;
                     }
                     objPtr = Jim_NamespaceQualifiers(interp, objPtr);
 
-                    name = Jim_String(objPtr);
+                    name = Jim_String(interp, objPtr);
 
                     if (name[0] != ':' || name[1] != ':') {
                         /* Make it fully scoped */
                         Jim_SetResultString(interp, "::", 2);
                         Jim_AppendObj(interp, Jim_GetResult(interp), objPtr);
                         Jim_IncrRefCount(objPtr);
-                        Jim_DecrRefCount(interp, objPtr);
+                        Jim_DecrRefCount(objPtr);
                     }
                     else {
                         Jim_SetResult(interp, objPtr);
@@ -328,7 +328,7 @@ static int JimNamespaceCmd(Jim_Interp *interp, int argc, Jim_Obj *const *argv)
                      * so helper procs must call [uplevel namespace canon] to get the callers
                      * namespace.
                      */
-                    return Jim_EvalEnsemble(interp, "namespace", Jim_String(argv[1]), argc - 2, argv + 2);
+                    return Jim_EvalEnsemble(interp, "namespace", Jim_String(interp, argv[1]), argc - 2, argv + 2);
             }
     }
     return JIM_ERR;

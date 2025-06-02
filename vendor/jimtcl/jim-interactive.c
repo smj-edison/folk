@@ -182,7 +182,7 @@ static char *JimHintsCallback(const char *prefix, int *color, int *bold, void *u
         int len = Jim_ListLength(info->interp, listObj);
         if (len >= 1) {
             long x;
-            result = Jim_StrDup(Jim_String(Jim_ListGetIndex(info->interp, listObj, 0)));
+            result = Jim_StrDup(Jim_String(info->interp, Jim_ListGetIndex(info->interp, listObj, 0)));
             if (len >= 2 && Jim_GetLong(info->interp, Jim_ListGetIndex(info->interp, listObj, 1), &x) == JIM_OK) {
                 *color = x;
             }
@@ -190,7 +190,7 @@ static char *JimHintsCallback(const char *prefix, int *color, int *bold, void *u
                 *bold = x;
             }
         }
-        Jim_DecrRefCount(info->interp, listObj);
+        Jim_DecrRefCount(listObj);
     }
     return result;
 }
@@ -242,7 +242,7 @@ void Jim_HistorySetCompletion(Jim_Interp *interp, Jim_Obj *completionCommandObj)
         Jim_IncrRefCount(completionCommandObj);
     }
     if (compinfo->completion_command) {
-        Jim_DecrRefCount(interp, compinfo->completion_command);
+        Jim_DecrRefCount(compinfo->completion_command);
     }
     compinfo->completion_command = completionCommandObj;
 #endif
@@ -262,7 +262,7 @@ void Jim_HistorySetHints(Jim_Interp *interp, Jim_Obj *hintsCommandObj)
         Jim_IncrRefCount(hintsCommandObj);
     }
     if (compinfo->hints_command) {
-        Jim_DecrRefCount(interp, compinfo->hints_command);
+        Jim_DecrRefCount(compinfo->hints_command);
     }
     compinfo->hints_command = hintsCommandObj;
 #endif

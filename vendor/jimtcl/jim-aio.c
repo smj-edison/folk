@@ -171,7 +171,7 @@ static int JimReadableTimeout(int fd, long ms)
 struct AioFile;
 
 typedef struct {
-    int (*writer)(struct AioFile *af, const char *buf, int len);
+    int (*writer)(Jim_Interp *interp, struct AioFile *af, const char *buf, int len);
     int (*reader)(struct AioFile *af, char *buf, int len, int pending);
     int (*error)(const struct AioFile *af);
     const char *(*strerror)(struct AioFile *af);
@@ -197,13 +197,13 @@ typedef struct AioFile
 
 static void aio_consume(Jim_Obj *objPtr, int n);
 
-static int stdio_writer(struct AioFile *af, const char *buf, int len)
+static int stdio_writer(Jim_Interp *interp, struct AioFile *af, const char *buf, int len)
 {
     int ret = write(af->fd, buf, len);
     if (ret < 0 && errno == EPIPE) {
         /* Also discard the write buffer since otherwise when
          * we try to flush on shutdown we may get SIGPIPE */
-        aio_consume(af->writebuf, Jim_Length(af->writebuf));
+        aio_consume(af->writebuf, Jim_LengthUnshared(interp, af->writebuf));
     }
     return ret;
 }
@@ -264,8 +264,9 @@ static const JimAioFopsType stdio_fops = {
 
 static SSL_CTX *JimAioSslCtx(Jim_Interp *interp);
 
-static int ssl_writer(struct AioFile *af, const char *buf, int len)
+static int ssl_writer(Jim_Interp *interp, struct AioFile *af, const char *buf, int len)
 {
+    JIM_NOTUSED(interp);
     return SSL_write(af->ssl, buf, len);
 }
 
@@ -731,7 +732,7 @@ static int aio_autoflush(Jim_Interp *interp, void *clientData, int mask)
     AioFile *af = clientData;
 
     aio_flush(interp, af);
-    if (Jim_Length(af->writebuf) == 0) {
+    if (Jim_LengthUnshared(interp, af->writebuf) == 0) {
         /* Done, so remove the handler */
         return -1;
     }
@@ -753,9 +754,9 @@ static int aio_autoflush(Jim_Interp *interp, void *clientData, int mask)
 static int aio_flush(Jim_Interp *interp, AioFile *af)
 {
     int len;
-    const char *pt = Jim_GetString(af->writebuf, &len);
+    const char *pt = Jim_GetStringUnshared(interp, af->writebuf, &len);
     if (len) {
-        int ret = af->fops->writer(af, pt, len);
+        int ret = af->fops->writer(interp, af, pt, len);
         if (ret > 0) {
             /* Consume what we wrote */
             aio_consume(af->writebuf, ret);
@@ -766,7 +767,7 @@ static int aio_flush(Jim_Interp *interp, AioFile *af)
         /* If not all data could be written, but with no error, and there is no writable
          * handler, we can try to auto-flush
          */
-        if (Jim_Length(af->writebuf)) {
+        if (Jim_LengthUnshared(interp, af->writebuf)) {
 #ifdef jim_ext_eventloop
             void *handler = Jim_FindFileHandler(interp, af->fd, JIM_EVENT_WRITABLE);
             if (handler == NULL) {
@@ -805,7 +806,7 @@ static int aio_read_len(Jim_Interp *interp, AioFile *af, unsigned flags, int nee
     }
 
     if (neededLen >= 0) {
-        neededLen -= Jim_Length(af->readbuf);
+        neededLen -= Jim_LengthUnshared(interp, af->readbuf);
         if (neededLen <= 0) {
             return JIM_OK;
         }
@@ -859,14 +860,14 @@ static Jim_Obj *aio_read_consume(Jim_Interp *interp, AioFile *af, int neededLen)
 {
     Jim_Obj *objPtr = NULL;
 
-    if (neededLen < 0 || af->readbuf == NULL || Jim_Length(af->readbuf) <= neededLen) {
+    if (neededLen < 0 || af->readbuf == NULL || Jim_LengthUnshared(interp, af->readbuf) <= neededLen) {
         objPtr = af->readbuf;
         af->readbuf = NULL;
     }
     else if (af->readbuf) {
         /* Need to consume part of the readbuf */
         int len;
-        const char *pt = Jim_GetString(af->readbuf, &len);
+        const char *pt = Jim_GetString(interp, af->readbuf, &len);
 
         objPtr  = Jim_NewStringObj(interp, pt, neededLen);
         aio_consume(af->readbuf, neededLen);
@@ -883,7 +884,7 @@ static void JimAioDelProc(Jim_Interp *interp, void *privData)
 
     /* Try to flush and write data before close */
     aio_flush(interp, af);
-    Jim_DecrRefCount(interp, af->writebuf);
+    Jim_DecrRefCount(af->writebuf);
 
 #if UNIX_SOCKETS
     if (af->addr_family == PF_UNIX && (af->flags & AIO_NODELETE) == 0) {
@@ -1059,7 +1060,7 @@ static int aio_cmd_copy(Jim_Interp *interp, int argc, Jim_Obj *const *argv)
             break;
         }
         objv[3] = aio_read_consume(interp, af, len);
-        count += Jim_Length(objv[3]);
+        count += Jim_LengthUnshared(interp, objv[3]);
         if (Jim_EvalObjVector(interp, 4, objv) != JIM_OK) {
             ok = 0;
             break;
@@ -1074,8 +1075,8 @@ static int aio_cmd_copy(Jim_Interp *interp, int argc, Jim_Obj *const *argv)
         }
     }
 
-    Jim_DecrRefCount(interp, objv[1]);
-    Jim_DecrRefCount(interp, objv[2]);
+    Jim_DecrRefCount(objv[1]);
+    Jim_DecrRefCount(objv[2]);
 
     if (!ok) {
         return JIM_ERR;
@@ -1106,7 +1107,7 @@ static int aio_cmd_gets(Jim_Interp *interp, int argc, Jim_Obj *const *argv)
 
     while (!aio_eof(af)) {
         if (af->readbuf) {
-            const char *pt = Jim_GetString(af->readbuf, &len);
+            const char *pt = Jim_GetStringUnshared(interp, af->readbuf, &len);
             nl = memchr(pt + offset, '\n', len - offset);
             if (nl) {
                 /* got a line */
@@ -1182,8 +1183,8 @@ static int aio_cmd_puts(Jim_Interp *interp, int argc, Jim_Obj *const *argv)
     if (Jim_IsShared(af->writebuf)) {
         /* This should generally never happen since this object isn't accessible,
          * but it is possible with 'debug objects' */
-        Jim_DecrRefCount(interp, af->writebuf);
-        af->writebuf = Jim_DuplicateObj(interp, af->writebuf);
+        Jim_DecrRefCount(af->writebuf);
+        af->writebuf = Jim_DuplicateObj(interp, af->writebuf, JIM_LIVE_LIST);
         Jim_IncrRefCount(af->writebuf);
     }
 #endif
@@ -1193,7 +1194,7 @@ static int aio_cmd_puts(Jim_Interp *interp, int argc, Jim_Obj *const *argv)
     }
 
     /* Now do we need to flush? */
-    wdata = Jim_GetString(af->writebuf, &wlen);
+    wdata = Jim_GetStringUnshared(interp, af->writebuf, &wlen);
     switch (af->wbuft) {
         case WBUF_OPT_NONE:
             /* Just write immediately */
@@ -1464,7 +1465,7 @@ static int aio_cmd_seek(Jim_Interp *interp, int argc, Jim_Obj *const *argv)
         return JIM_ERR;
     }
     if (af->readbuf) {
-        Jim_FreeNewObj(interp, af->readbuf);
+        Jim_FreeNewObj(af->readbuf);
         af->readbuf = NULL;
     }
     af->flags &= ~AIO_EOF;
@@ -2023,7 +2024,7 @@ static int aio_cmd_ttycontrol(Jim_Interp *interp, int argc, Jim_Obj *const *argv
 
     if (Jim_ListLength(interp, dictObjPtr) % 2) {
         /* Must be a valid dictionary */
-        Jim_DecrRefCount(interp, dictObjPtr);
+        Jim_DecrRefCount(dictObjPtr);
         return -1;
     }
 
@@ -2032,7 +2033,7 @@ static int aio_cmd_ttycontrol(Jim_Interp *interp, int argc, Jim_Obj *const *argv
         JimAioSetError(interp, NULL);
         ret = JIM_ERR;
     }
-    Jim_DecrRefCount(interp, dictObjPtr);
+    Jim_DecrRefCount(dictObjPtr);
 
     return ret;
 }
@@ -2348,7 +2349,7 @@ static int parse_open_mode(Jim_Interp *interp, Jim_Obj *filenameObj, Jim_Obj *mo
 {
     /* Parse the specified mode. */
     int flags;
-    const char *mode = Jim_String(modeObj);
+    const char *mode = Jim_String(interp, modeObj);
     if (*mode == 'R' || *mode == 'W') {
         return parse_posix_open_mode(interp, modeObj);
     }
@@ -2362,7 +2363,7 @@ static int parse_open_mode(Jim_Interp *interp, Jim_Obj *filenameObj, Jim_Obj *mo
         flags = O_WRONLY | O_CREAT | O_APPEND;
     }
     else {
-        Jim_SetResultFormatted(interp, "%s: invalid open mode '%s'", Jim_String(filenameObj), mode);
+        Jim_SetResultFormatted(interp, "%s: invalid open mode '%s'", Jim_String(interp, filenameObj), mode);
         return -1;
     }
     mode++;

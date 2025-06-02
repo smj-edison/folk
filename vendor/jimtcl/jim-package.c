@@ -153,7 +153,7 @@ static int package_cmd_forget(Jim_Interp *interp, int argc, Jim_Obj *const *argv
     int i;
 
     for (i = 0; i < argc; i++) {
-        Jim_DeleteHashEntry(&interp->packages, Jim_String(argv[i]));
+        Jim_DeleteHashEntry(&interp->packages, (void *)interp, Jim_String(interp, argv[i]));
     }
     return JIM_OK;
 }

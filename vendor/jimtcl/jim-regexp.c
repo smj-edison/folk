@@ -447,7 +447,7 @@ int Jim_RegsubCmd(Jim_Interp *interp, int argc, Jim_Obj *const *argv)
         Jim_IncrRefCount(cmd_prefix);
     }
     else {
-        replace_str = Jim_GetString(argv[i + 2], &replace_len);
+        replace_str = Jim_GetString(interp, argv[i + 2], &replace_len);
     }
     varname = argv[i + 3];
 
@@ -507,7 +507,7 @@ int Jim_RegsubCmd(Jim_Interp *interp, int argc, Jim_Obj *const *argv)
 
         if (opt_command) {
             /* construct the command as a list */
-            Jim_Obj *cmdListObj = Jim_DuplicateObj(interp, cmd_prefix);
+            Jim_Obj *cmdListObj = Jim_DuplicateObj(interp, cmd_prefix, JIM_LIVE_LIST);
             for (j = 0; j < MAX_SUB_MATCHES; j++) {
                 if (pmatch[j].rm_so == -1) {
                     break;
@@ -520,11 +520,11 @@ int Jim_RegsubCmd(Jim_Interp *interp, int argc, Jim_Obj *const *argv)
             Jim_IncrRefCount(cmdListObj);
 
             result = Jim_EvalObj(interp, cmdListObj);
-            Jim_DecrRefCount(interp, cmdListObj);
+            Jim_DecrRefCount(cmdListObj);
             if (result != JIM_OK) {
                 goto cmd_error;
             }
-            Jim_AppendString(interp, resultObj, Jim_String(Jim_GetResult(interp)), -1);
+            Jim_AppendString(interp, resultObj, Jim_String(interp, Jim_GetResult(interp)), -1);
         }
         else {
             /*
@@ -616,7 +616,7 @@ cmd_error:
                 Jim_SetResultInt(interp, num_matches);
             }
             else {
-                Jim_FreeObj(interp, resultObj);
+                Jim_FreeObj(resultObj);
             }
         }
         else {
@@ -625,14 +625,14 @@ cmd_error:
         }
     }
     else {
-        Jim_FreeObj(interp, resultObj);
+        Jim_FreeObj(resultObj);
     }
 
     if (opt_command) {
-        Jim_DecrRefCount(interp, cmd_prefix);
+        Jim_DecrRefCount(cmd_prefix);
     }
 
-	Jim_DecrRefCount(interp, regcomp_obj);
+	Jim_DecrRefCount(regcomp_obj);
 
     return result;
 }

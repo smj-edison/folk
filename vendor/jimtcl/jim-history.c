@@ -43,7 +43,7 @@ static int history_cmd_setcompletion(Jim_Interp *interp, int argc, Jim_Obj *cons
 
 static int history_cmd_sethints(Jim_Interp *interp, int argc, Jim_Obj *const *argv)
 {
-    Jim_HistorySetHints(interp, Jim_Length(argv[0]) ? argv[0] : NULL);
+    Jim_HistorySetHints(interp, Jim_Length(interp, argv[0]) ? argv[0] : NULL);
     return JIM_OK;
 }
 

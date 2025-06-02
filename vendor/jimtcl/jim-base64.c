@@ -129,10 +129,10 @@ BinaryEncode64(
 	case OPT_WRAPCHAR:
             // FIXME (osnr): This is weird
 	    wrapchar = (const char *)Jim_GetString(
-		    objv[i + 1], &wrapcharlen);
+		    interp, objv[i + 1], &wrapcharlen);
 	    if (wrapchar == NULL) {
 		purewrap = 0;
-		wrapchar = Jim_GetString(objv[i + 1], &wrapcharlen);
+		wrapchar = Jim_GetString(interp, objv[i + 1], &wrapcharlen);
 	    }
 	    break;
 	}
@@ -141,11 +141,11 @@ BinaryEncode64(
 	maxlen = 0;
     }
 
-    data = (const unsigned char *)Jim_GetString(objv[objc - 1], &count);
+    data = (const unsigned char *)Jim_GetString(interp, objv[objc - 1], &count);
     if (data == NULL) {
 	return JIM_ERR;
     }
-    resultObj = Jim_NewObj(interp);
+    resultObj = Jim_NewObj(interp, JIM_LIVE_LIST);
     resultObj->typePtr = NULL;
     if (count > 0) {
 	unsigned char *cursor = NULL;
@@ -248,9 +248,9 @@ BinaryDecode64(
 	}
     }
 
-    resultObj = Jim_NewObj(interp);
+    resultObj = Jim_NewObj(interp, JIM_LIVE_LIST);
     resultObj->typePtr = NULL;
-    data = (unsigned char *)Jim_GetString(objv[objc - 1], &count);
+    data = (unsigned char *)Jim_GetString(interp, objv[objc - 1], &count);
 
     datastart = data;
     dataend = data + count;
@@ -371,7 +371,7 @@ BinaryDecode64(
 	    "invalid base64 character \"%c\" (U+%06X) at position %"
 	    "zu", ucs4, ucs4, data - datastart - 1);
     // Jim_SetErrorCode(interp, "TCL", "BINARY", "DECODE", "INVALID", (char *)NULL);
-    Jim_DecrRefCount(interp, resultObj);
+    Jim_DecrRefCount(resultObj);
     return JIM_ERR;
 }
 
