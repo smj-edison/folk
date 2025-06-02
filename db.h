@@ -9,6 +9,11 @@ typedef struct Statement Statement;
 typedef struct Match Match;
 typedef struct Db Db;
 
+typedef struct Destructor {
+    void (*fn)(void*);
+    void* arg;
+} Destructor;
+
 // Refs are _weak_ references, meaning that the thing they are
 // pointing at may be invalid. A ref {0, 0} is always a null reference
 // (to enforce this, we set aside idx = 0 to never be a usable slot
@@ -39,6 +44,8 @@ typedef union MatchRef {
 Statement* statementAcquire(Db* db, StatementRef ref);
 void statementRelease(Db* db, Statement* stmt);
 
+Statement* statementUnsafeGet(Db* db, StatementRef ref);
+
 bool statementCheck(Db* db, StatementRef ref);
 
 StatementRef statementRef(Db* db, Statement* stmt);
@@ -52,7 +59,7 @@ bool statementHasOtherIncompleteChildMatch(Db* db, Statement* stmt,
 
 void statementIncrParentCount(Statement* stmt);
 void statementDecrParentCountAndMaybeRemoveSelf(Db* db, Statement* stmt);
-void statementRemoveSelf(Db* db, Statement* stmt);
+void statementRemoveSelf(Db* db, Statement* stmt, bool doDeindex);
 
 // Match
 // -----
@@ -66,7 +73,7 @@ void matchRelease(Db* db, Match* m);
 
 bool matchCheck(Db* db, MatchRef ref);
 
-void matchAddDestructor(Match* m, void (*fn)(void*), void* arg);
+void matchAddDestructor(Match* m, Destructor d);
 
 void matchCompleted(Match* m);
 void matchRemoveSelf(Db* db, Match* m);
@@ -97,8 +104,10 @@ ResultSet* dbQuery(Db* db, Clause* pattern);
 // MatchRef if this is an assertion. Returns a null StatementRef if no
 // new statement was created. 
 StatementRef dbInsertOrReuseStatement(Db* db, Clause* clause, long keepMs,
+                                      Destructor destructor,
                                       const char* sourceFileName, int sourceLineNumber,
-                                      MatchRef parent);
+                                      MatchRef parent,
+                                      StatementRef* outReusedStatementRef);
 
 // Call when you're about to begin a match (i.e., evaluating the body
 // of a When) -- creates the Match object that you'll attach any
@@ -118,6 +127,7 @@ void dbRetractStatements(Db* db, Clause* pattern);
 StatementRef dbHoldStatement(Db* db,
                              const char* key, int64_t version,
                              Clause* clause, long keepMs,
+                             Destructor destructor,
                              const char* sourceFileName, int sourceLineNumber,
                              StatementRef* outOldStatement);
 

@@ -21,7 +21,7 @@ extern ThreadControlBlock threads[];
 extern Db* db;
 extern void trace(const char* format, ...);
 extern void HoldStatementGlobally(const char *key, int64_t version,
-                                  Clause *clause, long keepMs,
+                                  Clause *clause, long keepMs, const char *destructorCode,
                                   const char *sourceFileName, int sourceLineNumber);
 extern void workerReactivateOrSpawn();
 
@@ -52,6 +52,7 @@ void sysmon() {
     // This is the system monitoring routine that runs on every tick
     // (every few milliseconds).
     int64_t currentTick = tick;
+    int64_t currentMs = currentTick * SYSMON_TICK_MS;
 
     // First: check that we have a reasonable amount of free RAM.
 #ifdef __linux__
@@ -91,7 +92,7 @@ void sysmon() {
                 // pileup.
                 Statement* stmt;
                 if ((stmt = statementAcquire(db, stmtRef))) {
-                    statementRemoveSelf(db, stmt);
+                    statementDecrParentCountAndMaybeRemoveSelf(db, stmt);
                     statementRelease(db, stmt);
                 }
 
@@ -101,7 +102,16 @@ void sysmon() {
         }
     }
 
-    // Third: manage the pool of worker threads.
+    // Third: collect garbage.
+    epochGlobalCollect();
+
+    ///////////////////////////////////
+    if (currentMs < 1000) { return; }
+    // Don't do the management tasks after this if the system isn't
+    // fully online yet.
+    ///////////////////////////////////
+
+    // Fourth: manage the pool of worker threads.
     // How many workers are _not_ blocked on I/O?
 #ifdef __linux__
     int notBlockedWorkersCount = 0;
@@ -140,7 +150,7 @@ void sysmon() {
     }
 #endif
 
-    // Fourth: update the clock time statement in the database.
+    // Fifth: update the clock time statement in the database.
     // sysmon.c claims the clock time is <TIME>
     int64_t timeNs = timestamp_get(CLOCK_REALTIME);
     Clause* clockTimeClause = malloc(SIZEOF_CLAUSE(7));
@@ -156,11 +166,8 @@ void sysmon() {
              (double)timeNs / 1000000000.0);
 
     HoldStatementGlobally("clock-time", currentTick,
-                          clockTimeClause, 5,
+                          clockTimeClause, 5, "",
                           "sysmon.c", __LINE__);
-
-    // Fifth: collect garbage.
-    epochGlobalCollect();
 }
 
 void *sysmonMain(void *ptr) {
@@ -181,8 +188,10 @@ void *sysmonMain(void *ptr) {
     }
     return NULL;
 }
+
+
 // This gets called from other threads.
-void sysmonRemoveAfter(StatementRef stmtRef, int afterMs) {
+void sysmonScheduleRemoveAfter(StatementRef stmtRef, int afterMs) {
     int afterTicks = afterMs / SYSMON_TICK_MS;
 
     int i;

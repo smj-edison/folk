@@ -14,7 +14,10 @@ if {[info exists ::argv0] && $::argv0 eq [info script]} {
 
 # HACK: We just query for this information outright, because we need
 # to know it at C compile time.
-set isGlfw [expr {[llength [Query! /anyone/ wishes $::thisNode uses display glfw]] > 0}]
+set isGlfw false
+Query! /anyone/ wishes $::thisNode uses display glfw {
+    set isGlfw true
+}
 
 # First, we build the C GPU library, which can make direct calls into
 # Vulkan -- this library then exposes functions that we can call from
@@ -27,6 +30,7 @@ set macos [expr {$::tcl_platform(os) eq "darwin"}]
 if {$macos} {
     $gpuc cflags -I/opt/homebrew/include -L/opt/homebrew/lib
     set isGlfw true
+    set __envStack [list]
 }
 
 if {$isGlfw} {
@@ -49,24 +53,21 @@ $gpuc struct Image {
     uint8_t* data;
 }
 
-# TODO: Support more than 16 concurrent images. This
-# constraint is imposed by Vulkan by default (device
-# maxPerStageDescriptorSamplers limit is 16). I think we can
-# increase it by querying GPU settings somehow.
-set GPU_MAX_IMAGES 16
-$gpuc proc getMaxImages {} int { return $GPU_MAX_IMAGES; }
-
 $gpuc include <stdlib.h>
-$gpuc code [csubst {
+$gpuc include <pthread.h>
+$gpuc code {
     #define VOLK_IMPLEMENTATION
     #include "volk/volk.h"
+}
+if {$isGlfw} {
+    $gpuc code {
+        // This must be included _after_ volk.h (Vulkan).
+        #include <GLFW/glfw3.h>
+    }
+}
 
-    $[if {$isGlfw} { subst {
-      // This must be included _after_ volk.h (Vulkan).
-      #include <GLFW/glfw3.h>
-    } }]
-
-    static const char* VkResultToString(VkResult res) {
+$gpuc argtype VkResult { long $argname; __ENSURE_OK(Jim_GetLong(interp, $obj, &$argname)); }
+$gpuc proc VkResultToString {VkResult res} char* {
             switch (res) {
     #define CASE(x) case VK_##x: return #x;
             CASE(SUCCESS)                       CASE(NOT_READY)
@@ -101,10 +102,9 @@ $gpuc code [csubst {
             default: return "unknown";
             }
     #undef CASE
-    }
-}]
+}
 
-proc vktry {call} { string map {\n " "} [csubst {{
+local proc vktry {call} { string map {\n " "} [csubst {{
     VkResult res = $call;
     if (res != VK_SUCCESS) {
         fprintf(stderr, "Failed $call: %s (%d)\n",
@@ -112,14 +112,17 @@ proc vktry {call} { string map {\n " "} [csubst {{
     }
 }}] }
 
-$gpuc code {
+$gpuc define {
     VkInstance instance;
     VkPhysicalDevice physicalDevice;
     VkPhysicalDeviceFeatures physicalDeviceFeatures;
+    VkPhysicalDeviceProperties physicalDeviceProperties;
     VkDevice device;
 
     uint32_t computeQueueFamilyIndex;
+    uint32_t graphicsQueueFamilyIndex = UINT32_MAX;
 
+    pthread_mutex_t graphicsQueueMutex;
     VkQueue graphicsQueue;
     VkQueue presentQueue;
     VkQueue computeQueue;
@@ -131,7 +134,7 @@ $gpuc code {
     VkFramebuffer* swapchainFramebuffers;
     VkExtent2D swapchainExtent;
 
-    VkCommandPool commandPool;
+    __thread VkCommandPool commandPool = 0;
 
     VkCommandBuffer commandBuffer;
     uint32_t imageIndex;
@@ -139,6 +142,16 @@ $gpuc code {
     VkSemaphore imageAvailableSemaphore;
     VkSemaphore renderFinishedSemaphore;
     VkFence inFlightFence;
+}
+$gpuc proc tryInitCommandPool {} void {
+    if (commandPool != 0) { return; }
+
+    VkCommandPoolCreateInfo poolInfo = {0};
+    poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    poolInfo.queueFamilyIndex = graphicsQueueFamilyIndex;
+
+    $[vktry {vkCreateCommandPool(device, &poolInfo, NULL, &commandPool)}]
 }
 $gpuc proc init {int displayIdx} void {
     $[vktry volkInitialize()]
@@ -207,9 +220,9 @@ $gpuc proc init {int displayIdx} void {
 
         physicalDevice = physicalDevices[0];
         vkGetPhysicalDeviceFeatures(physicalDevice, &physicalDeviceFeatures);
+        vkGetPhysicalDeviceProperties(physicalDevice, &physicalDeviceProperties);
     }
 
-    uint32_t graphicsQueueFamilyIndex = UINT32_MAX;
     computeQueueFamilyIndex = UINT32_MAX; {
         uint32_t queueFamilyCount = 0;
         vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyCount, NULL);
@@ -441,6 +454,7 @@ $gpuc proc init {int displayIdx} void {
 
     // Set up VkQueue graphicsQueue and VkQueue presentQueue and VkQueue computeQueue
     {
+        pthread_mutex_init(&graphicsQueueMutex, NULL);
         vkGetDeviceQueue(device, graphicsQueueFamilyIndex, 0, &graphicsQueue);
         presentQueue = graphicsQueue;
         computeQueue = graphicsQueue;
@@ -505,19 +519,11 @@ $gpuc proc init {int displayIdx} void {
         $[vktry {vkCreateFramebuffer(device, &framebufferInfo, NULL, &swapchainFramebuffers[i])}]
     }
 
-    // Set up VkCommandPool commandPool
-    {
-        VkCommandPoolCreateInfo poolInfo = {0};
-        poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-        poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-        poolInfo.queueFamilyIndex = graphicsQueueFamilyIndex;
-
-        $[vktry {vkCreateCommandPool(device, &poolInfo, NULL, &commandPool)}]
-    }
     // Set up VkCommandBuffer commandBuffer
     {
         VkCommandBufferAllocateInfo allocInfo = {0};
         allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        tryInitCommandPool();
         allocInfo.commandPool = commandPool;
         allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
         allocInfo.commandBufferCount = 1;
@@ -543,8 +549,15 @@ $gpuc proc getHeight {} uint32_t { return swapchainExtent.height; }
 $gpuc proc getDoesSupportShaderSampledImageArrayDynamicIndexing {} bool {
     return physicalDeviceFeatures.shaderSampledImageArrayDynamicIndexing;
 }
+$gpuc proc getMaxImages {} int {
+    int maxImages = physicalDeviceProperties.limits.maxPerStageDescriptorSamplers;
+    // If it's actually a low cap (often 16), stick with that.
+    if (maxImages < 128) { return maxImages; }
+    // HACK: for now, I don't want to deal with all the other descriptor caps etc.
+    return 128;
+}
 
-proc defineVulkanHandleType {cc type} {
+fn defineVulkanHandleType {cc type} {
     $cc argtype $type [format {
 #ifdef VK_USE_64_BIT_PTR_DEFINES
         %s $argname; sscanf(Jim_String($obj), "(%s) 0x%%p", &$argname);
@@ -565,6 +578,7 @@ proc defineVulkanHandleType {cc type} {
 #endif
     } $type $type]
 }
+Claim the GPU Vulkan handle type definer is [fn defineVulkanHandleType]
 
 # Shader compilation:
 defineVulkanHandleType $gpuc VkShaderModule
@@ -596,16 +610,26 @@ defineVulkanHandleType $gpuc VkDescriptorSetLayout
 $gpuc typedef uint64_t VkDeviceSize
 $gpuc argtype VkDescriptorType { int $argname; __ENSURE_OK(Tcl_GetIntFromObj(interp, $obj, &$argname)); }
 $gpuc rtype VkDescriptorType { $robj = Tcl_NewIntObj($rvalue); }
+$gpuc code {
+    typedef struct PushConstantsEncoder {
+        int (*encode)(Jim_Interp* interp, Jim_Obj* obj, uint8_t out[128]);
+    } PushConstantsEncoder;
+}
+$gpuc define {
+    VkDescriptorSetLayout imageDescriptorSetLayout;
+    VkDescriptorSet imageDescriptorSet;
+    pthread_rwlock_t imageDescriptorSetLock;
+}
 $gpuc struct Pipeline {
     VkPipeline pipeline;
     VkPipelineLayout pipelineLayout;
 
-    int id;
     size_t pushConstantsSize;
+    PushConstantsEncoder* encodePushConstants;
 }
-$gpuc proc createPipeline {int id
-                           VkShaderModule vertShaderModule
+$gpuc proc createPipeline {VkShaderModule vertShaderModule
                            VkShaderModule fragShaderModule
+                           PushConstantsEncoder* encodePushConstants
                            size_t pushConstantsSize} Pipeline {
         VkPipelineShaderStageCreateInfo shaderStages[2]; {
         VkPipelineShaderStageCreateInfo vertShaderStageInfo = {0};
@@ -632,10 +656,7 @@ $gpuc proc createPipeline {int id
 
     VkPipelineInputAssemblyStateCreateInfo inputAssembly = {0}; {
         inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-        // We're just going to draw a quad (4 vertices -> first 3
-        // vertices are top-left triangle, last 3 vertices are
-        // bottom-right triangle).
-        inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+        inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
         inputAssembly.primitiveRestartEnable = VK_FALSE;
     }
 
@@ -692,6 +713,18 @@ $gpuc proc createPipeline {int id
     colorBlending.attachmentCount = 1;
     colorBlending.pAttachments = &colorBlendAttachment;
 
+    VkPipelineDynamicStateCreateInfo dynamicState = {0};
+    dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    dynamicState.dynamicStateCount = 2;
+    // We need these to be dynamic so that pipelines can be retargeted
+    // to drawable surfaces (which have different viewports & scissors
+    // than the whole screen does).
+    VkDynamicState dynamicStates[] = {
+        VK_DYNAMIC_STATE_VIEWPORT,
+        VK_DYNAMIC_STATE_SCISSOR
+    };
+    dynamicState.pDynamicStates = dynamicStates;
+
     VkPipelineLayout pipelineLayout; {
         VkPipelineLayoutCreateInfo pipelineLayoutInfo = {0};
         pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
@@ -704,15 +737,13 @@ $gpuc proc createPipeline {int id
         // they take; this is so that pipelines are all
         // layout-compatible so we can reuse descriptor set
         // between pipelines without needing to rebind it.
-        {
-            VkPushConstantRange pushConstantRange = {0};
-            pushConstantRange.offset = 0;
-            pushConstantRange.size = 128;
-            pushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+        VkPushConstantRange pushConstantRange = {0};
+        pushConstantRange.offset = 0;
+        pushConstantRange.size = 128;
+        pushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
 
-            pipelineLayoutInfo.pPushConstantRanges = &pushConstantRange;
-            pipelineLayoutInfo.pushConstantRangeCount = 1;
-        }
+        pipelineLayoutInfo.pPushConstantRanges = &pushConstantRange;
+        pipelineLayoutInfo.pushConstantRangeCount = 1;
 
         $[vktry {vkCreatePipelineLayout(device, &pipelineLayoutInfo, NULL, &pipelineLayout)}]
     }
@@ -729,7 +760,7 @@ $gpuc proc createPipeline {int id
         pipelineInfo.pMultisampleState = &multisampling;
         pipelineInfo.pDepthStencilState = NULL;
         pipelineInfo.pColorBlendState = &colorBlending;
-        pipelineInfo.pDynamicState = NULL;
+        pipelineInfo.pDynamicState = &dynamicState;
 
         pipelineInfo.layout = pipelineLayout;
 
@@ -745,9 +776,8 @@ $gpuc proc createPipeline {int id
     return (Pipeline) {
         .pipeline = pipeline,
         .pipelineLayout = pipelineLayout,
-
-        .id = id,
-        .pushConstantsSize = pushConstantsSize
+        .pushConstantsSize = pushConstantsSize,
+        .encodePushConstants = encodePushConstants
     };
 }
     
@@ -756,8 +786,6 @@ $gpuc code {
     static VkDescriptorSet boundDescriptorSet;
 }
 $gpuc proc drawStart {} void {
-    vkWaitForFences(device, 1, &inFlightFence, VK_TRUE, UINT64_MAX);
-
     vkResetFences(device, 1, &inFlightFence);
 
     vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, imageAvailableSemaphore, VK_NULL_HANDLE, &imageIndex);
@@ -768,6 +796,7 @@ $gpuc proc drawStart {} void {
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     beginInfo.pInheritanceInfo = NULL;
+    pthread_rwlock_rdlock(imageDescriptorSetLock_ptr());
     $[vktry {vkBeginCommandBuffer(commandBuffer, &beginInfo)}]
 
     {
@@ -788,10 +817,29 @@ $gpuc proc drawStart {} void {
     boundPipeline = VK_NULL_HANDLE;
     boundDescriptorSet = VK_NULL_HANDLE;
 }
-$gpuc proc drawImpl {Pipeline pipeline Jim_Obj* pushConstantsObj} void {
+
+# Draw to the image `img` using pipeline `pipeline`. Each arg in
+# `args` should be a push-constant parameter of the pipeline. Can
+# only be called between `drawStart` and `drawEnd`.
+$gpuc proc draw {Pipeline pipeline Jim_Obj* argsObj} void {
     if (boundPipeline != pipeline.pipeline) {
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline.pipeline);
         boundPipeline = pipeline.pipeline;
+
+        VkViewport viewport = {0}; {
+            viewport.x = 0.0f;
+            viewport.y = 0.0f;
+            viewport.width = (float) swapchainExtent.width;
+            viewport.height = (float) swapchainExtent.height;
+            viewport.minDepth = 0.0f;
+            viewport.maxDepth = 1.0f;
+        }
+        vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
+        VkRect2D scissor = {0}; {
+            scissor.offset = (VkOffset2D) {0, 0};
+            scissor.extent = swapchainExtent;
+        }
+        vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
     }
 
     if (boundDescriptorSet != imageDescriptorSet) {
@@ -801,12 +849,14 @@ $gpuc proc drawImpl {Pipeline pipeline Jim_Obj* pushConstantsObj} void {
     }
 
     {
-        int pushConstantsDataSize;
-        const uint8_t* pushConstantsData = (const uint8_t*) Jim_GetString(pushConstantsObj, &pushConstantsDataSize);
+        uint8_t pushConstantsData[128];
+        int pushConstantsDataSize = pipeline.encodePushConstants->encode(interp, argsObj, pushConstantsData);
+        if (pushConstantsDataSize == -1) {
+            FOLK_ABORT();
+        }
         if (pushConstantsDataSize != pipeline.pushConstantsSize) {
-            fprintf(stderr, "drawImpl: Expected push constants size %zu; push constants data size was %d\n",
-                    pipeline.pushConstantsSize, pushConstantsDataSize);
-            exit(101);
+            FOLK_ERROR("Gpu draw: Expected push constants size %zu; push constants data size was %d\n",
+                       pipeline.pushConstantsSize, pushConstantsDataSize);
         }
         vkCmdPushConstants(commandBuffer, pipeline.pipelineLayout,
                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
@@ -838,7 +888,9 @@ $gpuc proc drawEnd {} void {
         submitInfo.signalSemaphoreCount = 1;
         submitInfo.pSignalSemaphores = signalSemaphores;
 
+        pthread_mutex_lock(&graphicsQueueMutex);
         $[vktry {vkQueueSubmit(graphicsQueue, 1, &submitInfo, inFlightFence)}]
+        pthread_mutex_unlock(&graphicsQueueMutex);
     }
     {
         VkPresentInfoKHR presentInfo = {0};
@@ -852,37 +904,37 @@ $gpuc proc drawEnd {} void {
         presentInfo.pImageIndices = &imageIndex;
         presentInfo.pResults = NULL;
 
+        pthread_mutex_lock(&graphicsQueueMutex);
         vkQueuePresentKHR(presentQueue, &presentInfo);
+        pthread_mutex_unlock(&graphicsQueueMutex);
     }
+
+    vkWaitForFences(device, 1, &inFlightFence, VK_TRUE, UINT64_MAX);
+    pthread_rwlock_unlock(imageDescriptorSetLock_ptr());
 }
 
 $gpuc proc poll {} void {
     $[expr { $isGlfw ? { glfwPollEvents(); } : {} }]
 }
 
-set makeGpu {{gpuLib} {
-    class Gpu {
-        gpuLib none
-        WIDTH 0
-        HEIGHT 0
-        nextPipelineId 0
-    }
-    Gpu method unknown {procName args} {
-        "$gpuLib $procName" {*}$args
+proc makeGpu {gpuLib} { return [library create gpu {gpuLib} {
+    variable gpuLib
+
+    if {![exists -command $gpuLib]} {
+        # Load manually so we don't need to call a command.
+        $gpuLib
     }
 
-    # Draw to the screen using pipeline `pipeline`. Each arg in `args`
-    # should be a push-constant parameter of the pipeline. Can only be
-    # called between `drawStart` and `drawEnd`.
-    Gpu method draw {pipeline args} {
-        set args [linsert $args 0 [list $WIDTH $HEIGHT]]
-
-        $self drawImpl $pipeline [::pipelineEncodeArgs[$self Pipeline_id $pipeline] {*}$args]
+    foreach gpuLibCmd [info commands "$gpuLib *"] {
+        lassign $gpuLibCmd _ gpuLibCmd
+        proc $gpuLibCmd {args} {gpuLib gpuLibCmd} {
+            tailcall "$gpuLib $gpuLibCmd" {*}$args
+        }
     }
 
     # Construct a reusable GLSL function that can be linked into and
     # called from a shader/pipeline.
-    Gpu method fn {arguments rtype body} {
+    proc fn {fnDict arguments rtype body} {
         set fnArgs [list]
         # We inline all dependent functions from the caller scope
         # immediately here, since we don't know if those dependencies
@@ -892,8 +944,12 @@ set makeGpu {{gpuLib} {
         foreach {argtype argname} $arguments {
             if {$argtype eq "fn"} {
                 # TODO: Support fn being a list {fnName fn}.
+                if {![dict exists $fnDict $argname]} {
+                    puts stderr "Gpu::fn: $argname not found"
+                    return -code 99 $argname
+                }
                 dict set depFnDict [string map {: ""} $argname] \
-                    [uplevel 2 [list set $argname]]
+                    [dict get $fnDict $argname]
             } else {
                 lappend fnArgs $argtype $argname
             }
@@ -903,7 +959,9 @@ set makeGpu {{gpuLib} {
 
     # Construct a shader pipeline that can be used to draw to the
     # screen.
-    Gpu method pipeline {args} {
+    proc pipeline {fnDict args} {
+        variable gpuLib
+
         if {[llength $args] == 3} {
             lassign $args vertArgs vertBody fragBody
             set fragArgs [list]
@@ -915,11 +973,13 @@ set makeGpu {{gpuLib} {
         set vertFnDict [dict create]
         set fragFnDict [dict create]
         set pushConstants [list]
-        set vertArgs [linsert $vertArgs 0 vec2 _resolution]
         foreach {argtype argname} $vertArgs {
             if {$argtype eq "fn"} {
                 # TODO: Support fn being a list {name fn}.
-                set fn [uplevel 2 [list set $argname]]
+                if {![dict exists $fnDict $argname]} {
+                    return -code 99 $argname
+                }
+                set fn [dict get $fnDict $argname]
                 set vertFnDict [dict merge $vertFnDict [lindex $fn 1]]
                 dict set vertFnDict $argname $fn
                 continue
@@ -929,7 +989,10 @@ set makeGpu {{gpuLib} {
         foreach {argtype argname} $fragArgs {
             if {$argtype eq "fn"} {
                 # TODO: Support fn being a list {name fn}.
-                set fn [uplevel 2 [list set $argname]]
+                if {![dict exists $fnDict $argname]} {
+                    return -code 99 $argname
+                }
+                set fn [dict get $fnDict $argname]
                 set fragFnDict [dict merge $fragFnDict [lindex $fn 1]]
                 dict set fragFnDict $argname $fn
                 continue
@@ -946,6 +1009,9 @@ set makeGpu {{gpuLib} {
         $cc struct vec3 { float x; float y; float z; }
         $cc struct vec4 { float x; float y; float z; float w; }
         $cc struct uvec4 { uint32_t x; uint32_t y; uint32_t z; uint32_t w; }
+        # Note that mat3 is COLUMN-MAJOR and every column has 1 float
+        # of padding at the end.
+        $cc struct mat3 { float data[12]; }
 
         $cc argtype vec2 {
             vec2 $argname;
@@ -996,29 +1062,75 @@ set makeGpu {{gpuLib} {
                 $argname = (uvec4) { (uint32_t)x, (uint32_t)y, (uint32_t)z, (uint32_t)w };
             }
         }
+        # Note that we take matrices from Tcl in ROW-MAJOR form and
+        # convert them to column-major form inline here.
+        $cc argtype mat3 {
+            mat3 $argname;
+            {
+                int $[set argname]_objc = Jim_ListLength(interp, $obj);
+                __ENSURE($[set argname]_objc == 3);
+                for (int y = 0; y < 3; y++) {
+                    Jim_Obj* rowObj = Jim_ListGetIndex(interp, $obj, y);
+                    __ENSURE(Jim_ListLength(interp, rowObj) == 3);
+                    for (int x = 0; x < 3; x++) {
+                        double el;
+                        __ENSURE_OK(Jim_GetDouble(interp, Jim_ListGetIndex(interp, rowObj, x), &el));
+
+                        int i = x * 4 + y;
+                        $argname.data[i] = el;
+                    }
+                }
+            }
+        }
         $cc code [csubst {
             typedef struct Args {
                 $[join [lmap {argtype argname} $pushConstants {
-                    expr {"_Alignas(sizeof($argtype)) $argtype $argname;"}
+                    set alignas [expr {$argtype eq "mat3" ? "16" : "sizeof($argtype)"}]
+                    subst {_Alignas($alignas) $argtype $argname;}
                 }] "\n"]
             } Args;
+
+            typedef struct PushConstantsEncoder {
+                int (*encode)(Jim_Interp* interp, Jim_Obj* obj, uint8_t out[128]);
+            } PushConstantsEncoder;
+
+            static __thread uint8_t argsBuf[128];
         }]
         $cc include <stddef.h>
         $cc proc getArgsSize {} int { return sizeof(Args); }
-        set pipelineId $nextPipelineId
-        $cc proc pipelineEncodeArgs$pipelineId $pushConstants Jim_Obj* {
+        $cc proc encodeArgs $pushConstants void {
             Args args = {$[join [lmap {argtype argname} $pushConstants { subst {.$argname = $argname} }] " ,"]};
-            return Jim_NewStringObj(interp, (const char *) &args, sizeof(args));
+            memcpy(argsBuf, &args, sizeof(args));
         }
-        $cc proc exportPipelineEncodeArgsToGlobal {} void {
-            Jim_CreateCommand(interp, "pipelineEncodeArgs$pipelineId",
-                              pipelineEncodeArgs${pipelineId}_Cmd, NULL, NULL);
-        }
-        set lib [$cc compile]
-        incr nextPipelineId
+        # This is what gets saved as the PushConstantsEncoder and
+        # called at draw time.
+        $cc proc encodeObj {Jim_Interp* interp Jim_Obj* obj uint8_t* out} int {
+            int objc = Jim_ListLength(interp, obj);
+            Jim_Obj* objv[1 + objc];
+            for (int i = 0; i < objc; i++) {
+                objv[1 + i] = Jim_ListGetIndex(interp, obj, i);
+            }
 
-        set pushConstantsSize [$lib getArgsSize]
-        $lib exportPipelineEncodeArgsToGlobal
+            int ret = encodeArgs_Cmd(interp, 1 + objc, objv);
+            if (ret != JIM_OK) {
+                // You CANNOT use FOLK_ENSURE here, because this is
+                // passed as function pointer and does not capture the
+                // correct jmp_buf for the caller.
+                return -1;
+            }
+
+            memcpy(out, argsBuf, sizeof(Args));
+            return sizeof(Args);
+        }
+        $cc proc makeEncoder {} PushConstantsEncoder* {
+            PushConstantsEncoder* encoder = malloc(sizeof(PushConstantsEncoder));
+            encoder->encode = encodeObj;
+            return encoder;
+        }
+        set pipelineLib [$cc compile]
+
+        set encodePushConstants [$pipelineLib makeEncoder]
+        set pushConstantsSize [$pipelineLib getArgsSize]
 
         set pushConstantsCode [if {[llength $pushConstants] > 0} {
             subst {
@@ -1035,7 +1147,7 @@ set makeGpu {{gpuLib} {
             }
         }]
 
-        set vertShaderModule [$self createShaderModule [glslc -fshader-stage=vert [csubst {
+        set vertShaderModule [$gpuLib createShaderModule [glslc -fshader-stage=vert [csubst {
             #version 450
 
             $pushConstantsCode
@@ -1049,7 +1161,7 @@ set makeGpu {{gpuLib} {
                 }
             }] "\n"]
 
-            vec2 vert() {
+            vec4 vert() {
                 $[join [lmap {argtype argname} $pushConstants {
                     if {$argname eq "_"} continue
                     if {$argtype eq "sampler2D"} continue
@@ -1059,8 +1171,7 @@ set makeGpu {{gpuLib} {
             }
 
             void main() {
-                vec2 v = (2.0*vert() - args._resolution)/args._resolution;
-                gl_Position = vec4(v, 0.0, 1.0);
+                gl_Position = vert();
             }
         }]]]
         # We pass the descriptor set with all images (samplers) to all
@@ -1079,8 +1190,8 @@ set makeGpu {{gpuLib} {
         # like that, we manually emit an if ladder that checks each
         # possible value of the push constant and uses the right
         # statically-indexed descriptor.
-        set gpuSupportsDynamicIndexing [$self getDoesSupportShaderSampledImageArrayDynamicIndexing]
-        set fragShaderModule [$self createShaderModule [glslc -fshader-stage=frag [csubst {
+        set gpuSupportsDynamicIndexing [$gpuLib getDoesSupportShaderSampledImageArrayDynamicIndexing]
+        set fragShaderModule [$gpuLib createShaderModule [glslc -fshader-stage=frag [csubst {
             #version 450
 
             layout(set = 0, binding = 0) uniform sampler2D _samplers[$[$gpuLib getMaxImages]];
@@ -1133,7 +1244,7 @@ set makeGpu {{gpuLib} {
                 } elseif {[llength $samplerIdxs] == 1} {
                     set samplerIdx [+ [lindex $samplerIdxs 0] 1]
                     set samplerName [lindex $pushConstants $samplerIdx]
-                    set maxImages [$self getMaxImages]
+                    set maxImages [$gpuLib getMaxImages]
                     set xs [list]
                     for {set i 0} {$i < $maxImages} {incr i} {
                         set patchedPushConstants [lreplace $pushConstants $samplerIdx $samplerIdx \
@@ -1153,8 +1264,9 @@ set makeGpu {{gpuLib} {
 
         # pipeline needs to contain a specification of push constants,
         # so they can be filled in at draw time.
-        set pipeline [$self createPipeline $pipelineId \
+        set pipeline [$gpuLib createPipeline \
                           $vertShaderModule $fragShaderModule \
+                          $encodePushConstants \
                           $pushConstantsSize]
         return $pipeline
     }
@@ -1166,482 +1278,12 @@ set makeGpu {{gpuLib} {
         set glslfd [open $glslfile w]; puts $glslfd $glsl; close $glslfd
         split [string map {\n ""} [exec glslc {*}$cmdargs -mfmt=num -o - $glslfile]] ","
     }
+}] }
 
-    return [Gpu new [list gpuLib $gpuLib]]
-}}
-
-# Image management:
-
-# The technique used to manage images here is to have a
-# single giant descriptor set for a giant GPU-side array of
-# images, which all shaders can access. (That descriptor set
-# _never_ has to be rebound; it stays bound through all draw
-# calls, forever.)
-# 
-# Each image has to be 'copied to the GPU' before you do any
-# draw calls that use it. Copying an image to the GPU gives
-# you a GPU-side image handle, which is just an integer index
-# into the GPU-side array. You can pass that image handle
-# into draw calls as a parameter (push constant) when you
-# want to draw/use the image.
-#
-# See:
-# - http://kylehalladay.com/blog/tutorial/vulkan/2018/01/28/Textue-Arrays-Vulkan.html
-# - https://chunkstories.xyz/blog/a-note-on-descriptor-indexing/
-# - https://gist.github.com/DethRaid/0171f3cfcce51950ee4ef96c64f59617
-# - http://roar11.com/2019/06/vulkan-textures-unbound/
-$gpuc code {
-    VkDescriptorSetLayout imageDescriptorSetLayout;
-    VkDescriptorSet imageDescriptorSet;
-}
-$gpuc proc imageManagerInit {} void {
-    // Set up imageDescriptorSetLayout:
-    {
-        /* VkDescriptorBindingFlags flags[1]; */
-        /* flags[0] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT; */
-
-        /* VkDescriptorSetLayoutBindingFlagsCreateInfo bindingFlags = {0}; */
-        /* bindingFlags.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO; */
-        /* bindingFlags.bindingCount = 1; */
-        /* bindingFlags.pBindingFlags = flags; */
-
-        VkDescriptorSetLayoutBinding bindings[1];
-        memset(bindings, 0, sizeof(bindings));
-        bindings[0].binding = 0;
-        bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        bindings[0].descriptorCount = getMaxImages();
-        bindings[0].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-
-        VkDescriptorSetLayoutCreateInfo createInfo = {0};
-        createInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        createInfo.bindingCount = 1;
-        createInfo.pBindings = bindings;
-        /* createInfo.pNext = &bindingFlags; */
-
-        vkCreateDescriptorSetLayout(device, &createInfo, NULL, &imageDescriptorSetLayout);
-    }
-
-    VkDescriptorPool descriptorPool; {
-        VkDescriptorPoolSize poolSize = {0};
-        poolSize.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        poolSize.descriptorCount = 512;
-
-        VkDescriptorPoolCreateInfo poolInfo = {0};
-        poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-        poolInfo.poolSizeCount = 1;
-        poolInfo.pPoolSizes = &poolSize;
-        poolInfo.maxSets = 100;
-        $[vktry {vkCreateDescriptorPool(device, &poolInfo, NULL, &descriptorPool)}]
-    }
-
-    // Set up imageDescriptorSet:
-    {
-        VkDescriptorSetAllocateInfo allocInfo = {0};
-        allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-        allocInfo.descriptorPool = descriptorPool;
-        allocInfo.descriptorSetCount = 1;
-        allocInfo.pSetLayouts = &imageDescriptorSetLayout;
-
-        $[vktry {vkAllocateDescriptorSets(device, &allocInfo, &imageDescriptorSet)}]
-    }
-}
-
-# Buffer allocation:
-$gpuc code [csubst {
-    uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) {
-        VkPhysicalDeviceMemoryProperties memProperties;
-        vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProperties);
-
-        for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
-            if ((typeFilter & (1 << i)) && (memProperties.memoryTypes[i].propertyFlags & properties) == properties) {
-                return i;
-            }
-        }
-
-        exit(1);
-    }
-
-    void createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties,
-                      VkBuffer* buffer, VkDeviceMemory* bufferMemory) {
-        VkBufferCreateInfo bufferInfo = {0};
-        bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-        bufferInfo.size = size;
-        bufferInfo.usage = usage;
-        bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-
-        $[vktry {vkCreateBuffer(device, &bufferInfo, NULL, buffer)}]
-
-        VkMemoryRequirements memRequirements;
-        vkGetBufferMemoryRequirements(device, *buffer, &memRequirements);
-
-        VkMemoryAllocateInfo allocInfo = {0};
-        allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-        allocInfo.allocationSize = memRequirements.size;
-        allocInfo.memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits, properties);
-
-        $[vktry {vkAllocateMemory(device, &allocInfo, NULL, bufferMemory)}]
-        vkBindBufferMemory(device, *buffer, *bufferMemory, 0);
-    }
-}]
-
-# Image allocation:
-$gpuc code [csubst {
-    void createImage(uint32_t width, uint32_t height,
-                     VkFormat format, VkImageTiling tiling, VkImageUsageFlags usage, VkMemoryPropertyFlags properties,
-                     VkImage* image, VkDeviceMemory* imageMemory) {
-        VkImageCreateInfo imageInfo = {0};
-        imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-        imageInfo.imageType = VK_IMAGE_TYPE_2D;
-        imageInfo.extent.width = width;
-        imageInfo.extent.height = height;
-        imageInfo.extent.depth = 1;
-        imageInfo.mipLevels = 1;
-        imageInfo.arrayLayers = 1;
-        imageInfo.format = format;
-        imageInfo.tiling = tiling;
-        imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        imageInfo.usage = usage;
-        imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
-        imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-
-        $[vktry {vkCreateImage(device, &imageInfo, NULL, image)}]
-
-        VkMemoryRequirements memRequirements;
-        vkGetImageMemoryRequirements(device, *image, &memRequirements);
-
-        VkMemoryAllocateInfo allocInfo = {0};
-        allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-        allocInfo.allocationSize = memRequirements.size;
-        allocInfo.memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits, properties);
-
-        $[vktry {vkAllocateMemory(device, &allocInfo, NULL, imageMemory)}]
-
-        vkBindImageMemory(device, *image, *imageMemory, 0);
-    }
-    VkCommandBuffer beginSingleTimeCommands() {
-        VkCommandBufferAllocateInfo allocInfo = {0};
-        allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-        allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-        allocInfo.commandPool = commandPool;
-        allocInfo.commandBufferCount = 1;
-
-        VkCommandBuffer commandBuffer;
-        vkAllocateCommandBuffers(device, &allocInfo, &commandBuffer);
-
-        VkCommandBufferBeginInfo beginInfo = {0};
-        beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-        beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-
-        vkBeginCommandBuffer(commandBuffer, &beginInfo);
-
-        return commandBuffer;
-    }
-    void endSingleTimeCommands(VkCommandBuffer commandBuffer) {
-        vkEndCommandBuffer(commandBuffer);
-
-        VkSubmitInfo submitInfo = {0};
-        submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-        submitInfo.commandBufferCount = 1;
-        submitInfo.pCommandBuffers = &commandBuffer;
-
-        vkQueueSubmit(graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
-        vkQueueWaitIdle(graphicsQueue);
-
-        vkFreeCommandBuffers(device, commandPool, 1, &commandBuffer);
-    }
-    void transitionImageLayout(VkImage image, VkFormat format,
-                               VkImageLayout oldLayout, VkImageLayout newLayout) {
-        VkCommandBuffer commandBuffer = beginSingleTimeCommands();
-
-        VkImageMemoryBarrier barrier = {0};
-        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        barrier.oldLayout = oldLayout;
-        barrier.newLayout = newLayout;
-        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier.image = image;
-        barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        barrier.subresourceRange.baseMipLevel = 0;
-        barrier.subresourceRange.levelCount = 1;
-        barrier.subresourceRange.baseArrayLayer = 0;
-        barrier.subresourceRange.layerCount = 1;
-
-        VkPipelineStageFlags sourceStage;
-        VkPipelineStageFlags destinationStage;
-        if (oldLayout == VK_IMAGE_LAYOUT_UNDEFINED && newLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
-            barrier.srcAccessMask = 0;
-            barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-
-            sourceStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
-            destinationStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
-        } else if (oldLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL && newLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
-            barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-            barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-
-            sourceStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
-            destinationStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-        } else {
-            exit(91);
-        }
-        vkCmdPipelineBarrier(commandBuffer,
-                             sourceStage, destinationStage,
-                             0,
-                             0, NULL,
-                             0, NULL,
-                             1, &barrier);
-
-        endSingleTimeCommands(commandBuffer);
-    }
-}]
-
-# Allocates(!) a copy of `im` with 4 channels, on the Tcl
-# local heap. Up to the caller to free it.
-$gpuc proc copyImageToRgba {Image im} Image {
-    if (im.components == 4) return im;
-    if (im.components != 1 && im.components != 3) exit(2);
-
-    Image ret = im;
-    ret.components = 4;
-    ret.bytesPerRow = ret.width * ret.components;
-    ret.data = malloc(ret.bytesPerRow * ret.height);
-
-    if (im.components == 3) {
-        for (int y = 0; y < im.height; y++) {
-            for (int x = 0; x < im.width; x++) {
-                int imidx = y*im.bytesPerRow + x*im.components;
-                int r = im.data[imidx+0],
-                    g = im.data[imidx+1], 
-                    b = im.data[imidx+2];
-
-                int ridx = y*ret.bytesPerRow + x*ret.components;
-                ret.data[ridx+0] = r;
-                ret.data[ridx+1] = g;
-                ret.data[ridx+2] = b;
-                ret.data[ridx+3] = 255;
-            }
-        }
-    } else {
-        for (int y = 0; y < im.height; y++) {
-            for (int x = 0; x < im.width; x++) {
-                int imidx = y*im.bytesPerRow + x*im.components;
-                int r = im.data[imidx],
-                    g = im.data[imidx], 
-                    b = im.data[imidx];
-
-                int ridx = y*ret.bytesPerRow + x*ret.components;
-                ret.data[ridx+0] = r;
-                ret.data[ridx+1] = g;
-                ret.data[ridx+2] = b;
-                ret.data[ridx+3] = 255;
-            }
-        }
-    }
-    return ret;
-}
-
-$gpuc typedef int gpu_image_handle_t
-$gpuc code [csubst {
-    // Points to all GPU-side data structures associated with
-    // an image (that we will destroy when we evict that
-    // image).
-    typedef struct gpu_image_block {
-        bool alive;
-
-        VkImage textureImage;
-        VkDeviceMemory textureImageMemory;
-        VkImageView textureImageView;
-        VkSampler textureSampler; 
-    } gpu_image_block;
-    gpu_image_block gpuImages[$GPU_MAX_IMAGES];
-
-    gpu_image_handle_t allocateGpuImageHandle() {
-        for (int i = 0; i < $GPU_MAX_IMAGES; i++) {
-            if (!gpuImages[i].alive) { return i; }
-        }
-        fprintf(stderr, "Gpu: Exceeded GPU_MAX_IMAGES\n"); exit(1);
-    }
-}]
-$gpuc proc copyImageToGpu {Image im0} gpu_image_handle_t {
-    gpu_image_handle_t imageId = allocateGpuImageHandle();
-    gpu_image_block* block = &gpuImages[imageId];
-    block->alive = true;
-
-    // Image must be RGBA.
-    Image im;
-    if (im0.components != 4) { im = copyImageToRgba(im0); }
-    else { im = im0; }
-
-    size_t size = im.width * im.height * 4;
-
-    VkBuffer stagingBuffer;
-    VkDeviceMemory stagingBufferMemory;
-    createBuffer(size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                 &stagingBuffer, &stagingBufferMemory);
-
-    createImage(im.width, im.height,
-                VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_TILING_OPTIMAL,
-                VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-                &block->textureImage, &block->textureImageMemory);
-
-    // Set up block->textureImageView:
-    {
-        VkImageViewCreateInfo viewInfo = {0};
-        viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-        viewInfo.image = block->textureImage;
-        viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-        viewInfo.format = VK_FORMAT_R8G8B8A8_SRGB;
-        viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        viewInfo.subresourceRange.baseMipLevel = 0;
-        viewInfo.subresourceRange.levelCount = 1;
-        viewInfo.subresourceRange.baseArrayLayer = 0;
-        viewInfo.subresourceRange.layerCount = 1;
-        $[vktry {vkCreateImageView(device, &viewInfo, NULL, &block->textureImageView)}]
-    }
-    // Set up block->textureSampler:
-    {
-        VkSamplerCreateInfo samplerInfo = {0};
-        samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-        samplerInfo.magFilter = VK_FILTER_LINEAR;
-        samplerInfo.minFilter = VK_FILTER_LINEAR;
-        samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-        samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-        samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-        samplerInfo.anisotropyEnable = VK_FALSE; // TODO: do we want this?
-        samplerInfo.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
-        samplerInfo.unnormalizedCoordinates = VK_FALSE;
-        samplerInfo.compareEnable = VK_FALSE;
-        samplerInfo.compareOp = VK_COMPARE_OP_ALWAYS;
-        samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
-        samplerInfo.mipLodBias = 0.0f;
-        samplerInfo.minLod = 0.0f;
-        samplerInfo.maxLod = 0.0f;
-        $[vktry {vkCreateSampler(device, &samplerInfo, NULL, &block->textureSampler)}]
-    }
-
-    // Copy im to stagingBuffer:
-    {
-        void* data; vkMapMemory(device, stagingBufferMemory, 0, size, 0, &data);
-        for (int y = 0; y < im.height; y++) {
-            memcpy(data + y*im.width*4,
-                   im.data + y*im.bytesPerRow,
-                   im.width*4);
-        }
-        vkUnmapMemory(device, stagingBufferMemory);
-    }
-    // Copy stagingBuffer to block->textureImage:
-    {
-        transitionImageLayout(block->textureImage, VK_FORMAT_R8G8B8A8_SRGB,
-                              VK_IMAGE_LAYOUT_UNDEFINED,
-                              VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-
-        VkCommandBuffer commandBuffer = beginSingleTimeCommands();
-
-        VkBufferImageCopy region = {0};
-        region.bufferOffset = 0;
-        region.bufferRowLength = 0;
-        region.bufferImageHeight = 0;
-
-        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        region.imageSubresource.mipLevel = 0;
-        region.imageSubresource.baseArrayLayer = 0;
-        region.imageSubresource.layerCount = 1;
-
-        region.imageOffset = (VkOffset3D) {0, 0, 0};
-        region.imageExtent = (VkExtent3D) {im.width, im.height, 1};
-        vkCmdCopyBufferToImage(commandBuffer,
-                               stagingBuffer,
-                               block->textureImage,
-                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                               1,
-                               &region);
-
-        endSingleTimeCommands(commandBuffer);
-
-        transitionImageLayout(block->textureImage, VK_FORMAT_R8G8B8A8_SRGB,
-                              VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    }
-
-    vkDestroyBuffer(device, stagingBuffer, NULL);
-    vkFreeMemory(device, stagingBufferMemory, NULL);
-
-    // Write this image+sampler to the imageDescriptorSet
-    static bool didInitializeDescriptors = false;
-    {
-        VkDescriptorImageInfo imageInfo = {0};
-        imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        imageInfo.imageView = block->textureImageView;
-        imageInfo.sampler = block->textureSampler;
-
-        if (!didInitializeDescriptors) {
-            // Hack: if we're not using the descriptor
-            // indexing extension, we can't have a partially
-            // bound descriptor set, so we need to fill all
-            // the slots in the image array with
-            // _something_. We just fill all slots wtih the
-            // first image for now. See
-            // http://roar11.com/2019/06/vulkan-textures-unbound/
-            VkWriteDescriptorSet descriptorWrites[getMaxImages()];
-            for (int i = 0; i < getMaxImages(); i++) {
-                memset(&descriptorWrites[i], 0, sizeof(VkWriteDescriptorSet));
-                descriptorWrites[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-                descriptorWrites[i].dstSet = imageDescriptorSet;
-                descriptorWrites[i].dstBinding = 0;
-                descriptorWrites[i].dstArrayElement = i;
-                descriptorWrites[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-                descriptorWrites[i].descriptorCount = 1;
-                descriptorWrites[i].pImageInfo = &imageInfo;
-            }
-            vkUpdateDescriptorSets(device, getMaxImages(), descriptorWrites, 0, NULL);
-            didInitializeDescriptors = true;
-        } else {
-            VkWriteDescriptorSet descriptorWrite = {0};
-            descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            descriptorWrite.dstSet = imageDescriptorSet;
-            descriptorWrite.dstBinding = 0;
-            descriptorWrite.dstArrayElement = imageId;
-            descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            descriptorWrite.descriptorCount = 1;
-            descriptorWrite.pImageInfo = &imageInfo;
-            vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, NULL);
-        }
-    }
-
-    if (im0.components != 4) { free(im.data); }
-    return imageId;
-}
-$gpuc proc freeGpuImage {gpu_image_handle_t gim} void {
-    gpu_image_block* block = &gpuImages[gim];
-    block->alive = false;
-
-    vkDeviceWaitIdle(device); // TODO: this is probably slow
-
-    // HACK: Use GPU image 0 as a placeholder so it doesn't
-    // fault if it tries to access this freed image.
-    {
-        VkDescriptorImageInfo imageInfo = {0};
-        imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        imageInfo.imageView = gpuImages[0].textureImageView;
-        imageInfo.sampler = gpuImages[0].textureSampler;
-
-        VkWriteDescriptorSet descriptorWrite = {0};
-        descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        descriptorWrite.dstSet = imageDescriptorSet;
-        descriptorWrite.dstBinding = 0;
-        descriptorWrite.dstArrayElement = gim;
-        descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        descriptorWrite.descriptorCount = 1;
-        descriptorWrite.pImageInfo = &imageInfo;
-        vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, NULL);
-    }
-
-    vkDestroyImage(device, block->textureImage, NULL);
-    vkFreeMemory(device, block->textureImageMemory, NULL);
-    vkDestroySampler(device, block->textureSampler, NULL);
-    vkDestroyImageView(device, block->textureImageView, NULL);
-}
 set gpuLib [$gpuc compile]
+Claim the GPU library is $gpuLib
+
+set gpu [makeGpu $gpuLib]
 
 # if {!$macos} {
 #     # Needed on Raspberry Pi 4:
@@ -1649,32 +1291,32 @@ set gpuLib [$gpuc compile]
 # }
 
 if {$macos} {
-    local proc When {args} {
+    # HACK: to guarantee that GPU init runs on main thread.
+    local proc When' {args} {
+        while {![info exists gpuImageLib]} {
+            ForEach! the GPU image library is /gpuImageLib/ {}
+            sleep 0.1
+        }
         set body [lindex $args end]
+        uplevel {set __envStack [list]}
         uplevel {set displayIdx 0}
-        uplevel $body
+        uplevel {set this "virtual-programs/gpu.folk"}
+        uplevel [list set gpuImageLib $gpuImageLib]
+        uplevel [list applyBlock $body [uplevel captureEnvStack]]
     }
+} else {
+    local proc When' {args} { uplevel [list When {*}$args] }
 }
-When /someone/ wishes $::thisNode uses display /displayIdx/ {
+When' /someone/ wishes $::thisNode uses display /displayIdx/ &\
+      the GPU image library is /gpuImageLib/ {
     if {$displayIdx eq "glfw"} { set displayIdx -1 }
 
     tracy setThreadName "gpu"
 
-    set gpu [apply $makeGpu $gpuLib]
     $gpu init $displayIdx
-    $gpu eval {set WIDTH [$self getWidth]; set HEIGHT [$self getHeight]}
-    $gpu imageManagerInit
+    $gpuImageLib imageManagerInit
 
-    Claim display $displayIdx has width [$gpu get WIDTH] height [$gpu get HEIGHT]
-
-    # Dictionary where key is pipeline name and value is [list
-    # $pipelineSource $compiledPipeline].
-    set pipelines [dict create]
-    # Dictionary where key is function name and value is function source
-    # object.
-    set functions [dict create]
-    # Dictionary where key is image object and value is GPU image handle.
-    set gpuImages [dict create]
+    Claim display $displayIdx has width [$gpu getWidth] height [$gpu getHeight]
 
     set kGpu [tracy makeString "gpu"]
     set kLatency [tracy makeString "latency"]
@@ -1682,6 +1324,61 @@ When /someone/ wishes $::thisNode uses display /displayIdx/ {
     set kRegionCount [tracy makeString "regionCount"]
     set kDrawCount [tracy makeString "drawCount"]
 
+    fn QueryAllFns! {} {
+        set fns [dict create]
+        ForEach! /someone/ claims the GPU compiles function /name/ to /fn/ {
+            dict set fns $name $fn
+        }
+        return $fns
+    }
+    fn tryCompileFn {wisher name source} {
+        try {
+            set fns [QueryAllFns!]
+            set fn [$gpu fn $fns {*}$source]
+
+            # Technically a misnomer: the function is just stored, not
+            # compiled until it's been inlined into a shader.
+            Claim the GPU compiles function $name to $fn
+
+        } on 99 notFoundName {
+            puts "gpu fn $name: Waiting for $notFoundName"
+            When the GPU compiles function $notFoundName to /anything/ {
+                puts "Did compile $notFoundName"
+                tryCompileFn $wisher $name $source
+            }
+        } on error e {
+            puts stderr "Error: GPU compiles function $name: [errorInfo $e]"
+            Claim $wisher has error $e with info [errorInfo $e]
+        }
+    }
+    fn tryCompilePipeline {wisher name source} {
+        try {
+            set fns [QueryAllFns!]
+            set pipeline [$gpu pipeline $fns {*}$source]
+
+            puts "Compiled $name"
+            Claim the GPU compiles pipeline $name to $pipeline
+
+        } on 99 notFoundName {
+            puts "gpu pipeline $name: Waiting for $notFoundName"
+            When the GPU compiles function $notFoundName to /anything/ {
+                puts "Did compile $notFoundName"
+                tryCompilePipeline $wisher $name $source
+            }
+        } on error e {
+            puts stderr "Error: GPU compiles pipeline $name: [errorInfo $e]"
+            Claim $wisher has error $e with info [errorInfo $e]
+        }
+    }
+
+    When /wisher/ wishes the GPU compiles function /name/ /source/ {
+        tryCompileFn $wisher $name $source
+    }
+    When /wisher/ wishes the GPU compiles pipeline /name/ /source/ {
+        tryCompilePipeline $wisher $name $source
+    }
+
+    set missingPipelines [dict create]
     while true {
         # This blocks until the start of the next frame.
         $gpu drawStart
@@ -1689,52 +1386,24 @@ When /someone/ wishes $::thisNode uses display /displayIdx/ {
         # We do the queries now (when we are about to draw) so we get
         # the most up-to-date information.
 
+        set matches [Query! /someone/ claims the GPU compiles pipeline /name/ to /pipeline/]
+        set pipelines [dict create]
+        foreach match $matches { dict with match { dict set pipelines $name $pipeline } }
+
         set displayList [dict create]
-        foreach match [Query! /wisher/ wishes the GPU loads image /im/] {
-            dict with match {
-                if {![dict exists $gpuImages $im]} {
-                    set gim [$gpu copyImageToGpu $im]
-                    dict set gpuImages $im $gim
-                    Assert! gpu.folk claims the GPU has loaded image $im as $gim
-                }
-            }
-        }
-        foreach match [Query! /wisher/ wishes the GPU compiles function /name/ /source/] {
-            dict with match {
-                if {![dict exists $functions $name]} {
-                    try {
-                        dict with functions {
-                            set fn [$gpu fn {*}$source]
-                        }
-                        dict set functions $name $fn
-                    } on error e {
-                        puts stderr "Error: GPU compiles function $name: [errorInfo $e]"
-                        Assert! gpu.folk claims $wisher has error $e with info [errorInfo $e]
-                    }
-                }
-            }
-        }
-        foreach match [Query! /wisher/ wishes the GPU compiles pipeline /name/ /source/] {
-            dict with match {
-                try {
-                    if {[dict exists $pipelines $name] &&
-                        [lindex [dict get $pipelines $name] 0] eq $source} {
-                        # Already compiled this one.
-                        continue
-                    }
-                    dict with functions {
-                        dict set pipelines $name [list $source [$gpu pipeline {*}$source]]
-                    }
-                } on error e {
-                    puts stderr "Error: GPU compiles pipeline $name: [errorInfo $e]"
-                    Assert! gpu.folk claims $wisher has error $e with info [errorInfo $e]
-                }
-            }
-        }
         foreach match [Query! /wisher/ wishes the GPU draws pipeline /name/ with /...options/] {
             try {
                 set name [dict get $match name]
-                set pipeline [lindex [dict get $pipelines [dict get $match name]] 1]
+                if {![dict exists $pipelines $name]} {
+                    if {![dict exists $missingPipelines $name]} {
+                        puts stderr "gpu: Missing pipeline $name"
+                        dict set missingPipelines $name true
+                    }
+                    continue
+                }
+                dict unset missingPipelines $name
+
+                set pipeline [dict get $pipelines [dict get $match name]]
 
                 set options [dict get $match options]
                 set layer [dict getdef $options layer 0]
@@ -1744,11 +1413,12 @@ When /someone/ wishes $::thisNode uses display /displayIdx/ {
                     set instances [list [dict get $options arguments]]
                 }
                 foreach instance $instances {
-                    dict lappend displayList $layer [list $gpu draw $pipeline {*}$instance]
+                    dict lappend displayList $layer \
+                        [list $gpu draw $pipeline $instance]
                 }
             } on error e {
-                puts stderr [errorInfo $e]
-                Assert! gpu.folk claims [dict get $match wisher] has error $e with info [errorInfo $e]
+                puts stderr "Error: GPU draws pipeline $name: [errorInfo $e]"
+                Assert! $this claims [dict get $match wisher] has error $e with info [errorInfo $e]
                 # TODO: does this ever get disposed?
             }
         }
@@ -1766,12 +1436,13 @@ When /someone/ wishes $::thisNode uses display /displayIdx/ {
         }
 
         # tracy plot $kQuadCount [llength [Query! /someone/ claims /tag/ has quad /q/]]
-        tracy plot $kRegionCount [llength [Query! /someone/ claims {editing 785 /dev/input/by-path/pci-0000:02:00.0-usb-0:2:1.2-event-mouse} has region /r/]]
+        # tracy plot $kRegionCount [llength [Query! /someone/ claims {editing 785 /dev/input/by-path/pci-0000:02:00.0-usb-0:2:1.2-event-mouse} has region /r/]]
         # tracy plot $kDrawCount $drawCount
         tracy zoneEnd
         $gpu drawEnd
 
         tracy frameMarkNamed $kGpu
+
         $gpu poll
 
         # TODO: sleep for 5ms or something?

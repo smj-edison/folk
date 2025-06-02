@@ -3,3 +3,4 @@ folk.pid
 *.o
 .vscode
 fuzzing-output
+folk.dSYM

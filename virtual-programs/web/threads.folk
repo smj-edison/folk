@@ -61,6 +61,13 @@ set threadMonitorLib [apply {{} {
                            Jim_NewStringObj(interp, "elapsed", -1),
                            Jim_NewDoubleObj(interp, (double)(now - thread->currentItemStartTimestamp) / 1000.0));
 
+        Jim_DictAddElement(interp, ret,
+                           Jim_NewStringObj(interp, "_allocs", -1),
+                           Jim_NewDoubleObj(interp, thread->_allocs));
+        Jim_DictAddElement(interp, ret,
+                           Jim_NewStringObj(interp, "_frees", -1),
+                           Jim_NewDoubleObj(interp, thread->_frees));
+
         return ret;
     }
     $cc proc workerInfoFromTid {int tid} Jim_Obj* {
@@ -119,6 +126,7 @@ Wish the web server handles route "/threads" with handler [list apply {{threadMo
         set tids [$threadMonitorLib workerTids]
     }
 
+    set totalAllocsMinusFrees 0.0
     html [subst {
         <html>
         <head>
@@ -155,13 +163,20 @@ Wish the web server handles route "/threads" with handler [list apply {{threadMo
                 set kernelStack "<not permitted>"
             }
 
+            set allocs [dict getdef $workerInfo _allocs -1]
+            set frees [dict getdef $workerInfo _frees -1]
             subst {<li style="[expr {$workerInfo eq "" ? "color: gray" : ""}]">
                 $taskdir: [regexp -inline {State:[^\n]*\n} $status]<br>
                   [if {$workerInfo eq ""} {subst {
                       (Not a Folk worker thread)<br>
                   }} else {
+                      set totalAllocsMinusFrees [expr {$totalAllocsMinusFrees + ($allocs - $frees)}]
+
                       set workQueue [dict get $workerInfo workQueue]
                       subst {
+                          [format "allocs - frees: %.2f MB" [expr {($allocs - $frees) / 1000000.0}]]
+                          ([format "allocs: %.2f MB" [/ $allocs 1000000.0]];
+                          [format "frees: %.2f MB" [/ $frees 1000000.0]])<br>
                           [htmlEscape [dict get $workerInfo op]] (elapsed: [dict get $workerInfo elapsed] us)<br>
                           <details>
                             <summary>Work queue ([llength $workQueue] items):</summary>
@@ -174,6 +189,8 @@ Wish the web server handles route "/threads" with handler [list apply {{threadMo
             </li>}
         }] "\n"]
         </ol>
+
+        <p>Total allocs - frees: [format "%.2f MB" [expr {$totalAllocsMinusFrees / 1000000.0}]]</p>
 
         <h2>Global workqueue ([$threadMonitorLib globalWorkQueueAvailable])</h2>
         <ol start="0">

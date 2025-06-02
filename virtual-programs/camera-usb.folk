@@ -36,11 +36,8 @@ $camc struct Camera {
 
 $camc code {
     void quit(const char* msg) {
-        char s[500];
-        snprintf(s, sizeof(s),
-                 "camera-usb: Quitting: [%s] %d: %s\n",
-                 msg, errno, strerror(errno));
-        FOLK_ERROR(s);
+        FOLK_ERROR("camera-usb: Quitting: [%s] %d: %s\n",
+                   msg, errno, strerror(errno));
     }
 
     int xioctl(int fd, int request, void* arg) {
@@ -64,8 +61,11 @@ $camc struct Image {
 }
 
 $camc proc cameraOpen {char* device int width int height} Camera* {
-    printf("device [%s]\n", device);
-    int fd = open(device, O_RDWR | O_NONBLOCK, 0);
+    printf("camera-usb: Loading '%s'\n", device);
+    // O_CLOEXEC is necessary so long-running child processes (like
+    // fswatch) don't keep the camera open past the death of folk
+    // itself, which causes EBUSY for the next Folk process.
+    int fd = open(device, O_RDWR | O_NONBLOCK | O_CLOEXEC, 0);
     if (fd == -1) quit("open");
     Camera* camera = malloc(sizeof(Camera));
     camera->fd = fd;
@@ -113,7 +113,8 @@ $camc proc cameraInit {Camera* camera uint32_t requested_buffer_count} void {
     int ret;
     do {
         ret = xioctl(camera->fd, VIDIOC_S_FMT, &format);
-        fprintf(stderr, "VIDIOC_S_FMT: %d; %d\n", ret, errno);
+        fprintf(stderr, "camera-usb: VIDIOC_S_FMT: ret = %d (%d) (%s)\n",
+                ret, errno, strerror(errno));
         usleep(100000);
     } while (ret == -1 && errno == EBUSY);
     if (ret == -1) quit("VIDIOC_S_FMT");
@@ -226,6 +227,24 @@ $camc proc cameraFrame {Camera* camera} int {
     return camera_capture(camera);
 }
 
+$camc proc setExposure {Camera* camera int value} void {
+    struct v4l2_control c;
+
+    c.id = V4L2_CID_EXPOSURE_AUTO;
+    c.value = V4L2_EXPOSURE_MANUAL;
+    FOLK_ENSURE(xioctl(camera->fd, VIDIOC_S_CTRL, &c) == 0);
+
+    c.id = V4L2_CID_EXPOSURE_ABSOLUTE;
+    c.value = value;
+    FOLK_ENSURE(xioctl(camera->fd, VIDIOC_S_CTRL, &c) == 0);
+}
+$camc proc setExposureAuto {Camera* camera} void {
+    struct v4l2_control c;
+    c.id = V4L2_CID_EXPOSURE_AUTO;
+    c.value = V4L2_EXPOSURE_APERTURE_PRIORITY;
+    FOLK_ENSURE(xioctl(camera->fd, VIDIOC_S_CTRL, &c) == 0);
+}
+
 $camc proc cameraDecompressRgb {Camera* camera Image dest} void {
     struct jpeg_decompress_struct cinfo;
     struct jpeg_error_mgr jerr;
@@ -314,6 +333,28 @@ set camLib [$camc compile]
 When /someone/ wishes $::thisNode uses camera /camera/ with /...options/ {
     if {![string match "/dev*" $camera]} { return }
 
+    set width [dict get $options width]
+    set height [dict get $options height]
+    set bufferCount [dict getdef $options bufferCount 2]
+
+    if {[dict exists $options crop]} {
+        set crop [dict get $options crop]
+    }
+    # HACK: we should share this
+    local proc subimage {im x y subwidth subheight} {
+        dict with im {
+            set x [expr {int($x)}]
+            set y [expr {int($y)}]
+            set subdata [expr {[lindex $data 1] + ($y*$width + $x) * $components}]
+            dict create \
+                width $subwidth \
+                height $subheight \
+                components $components \
+                bytesPerRow $bytesPerRow \
+                data [format "(uint8_t*) 0x%x" $subdata]
+        }
+    }
+
     namespace eval Camera {
         variable camLib [uplevel {set camLib}]
         proc unknown {procName args} {
@@ -321,7 +362,7 @@ When /someone/ wishes $::thisNode uses camera /camera/ with /...options/ {
         }
         proc new {device width height bufferCount} {
             set camera [cameraOpen $device $width $height]
-            puts "camera-usb: Loaded $camera"
+            puts "camera-usb: Loaded $device -> $camera"
             cameraInit $camera $bufferCount
             cameraStart $camera
             # skip 5 frames for booting a cam
@@ -354,26 +395,44 @@ When /someone/ wishes $::thisNode uses camera /camera/ with /...options/ {
     set width [dict get $options width]
     set height [dict get $options height]
     set bufferCount [dict getdef $options bufferCount 4]
-    Claim camera $camera has width $width height $height
     set camObj [Camera::new $camera $width $height $bufferCount]
 
-    set oldFrames [list]
+    Claim camera $camera has width $width height $height
+
+    When /someone/ wishes camera $camera uses exposure time /exposureTimeUs/ us {
+        if {$exposureTimeUs eq "auto"} {
+            $camLib setExposureAuto $camObj
+        } else {
+            $camLib setExposure $camObj [expr {int($exposureTimeUs / 100)}]
+        }
+    }
+
     try -signal {
         while true {
             tracy zoneBegin
 
             set frame [Camera::grayFrame $camObj]
+
+            if {[info exists crop]} {
+                dict with crop {
+                    set cropped [subimage $frame $x $y $width $height]
+                }
+            } else {
+                set cropped $frame
+            }
             set timestamp [expr {[clock milliseconds] / 1000.0}]
             tracy zoneName "camera-usb: $timestamp"
-            HoldStatement! camera \
-                [list $this claims camera $camera has frame $frame at timestamp $timestamp]
-
-            lappend oldFrames $frame
-            if {[llength $oldFrames] >= 50} {
-                set oldFrames [lassign $oldFrames oldestFrame]
-                # puts stderr "freeing old frame ($oldestFrame)"
-                $camLib freeImage $oldestFrame
-            }
+            # HACK: We retain the statement for 400ms (which is
+            # probably pretty memory-expensive...) so that it's still
+            # around when its AprilTags are fully detected, so we can
+            # store the image for debugging during calibration. Note
+            # that HoldStatement! will deindex this immediately on the
+            # next frame, so you need to match this first before
+            # matching the tag detection if you want to have a handle
+            # on it later.
+            HoldStatement! (keep 400ms) camera \
+                -destructor [list $camLib freeImage $frame] \
+                [list $this claims camera $camera has frame $cropped at timestamp $timestamp]
 
             tracy zoneEnd
         }

@@ -9,6 +9,7 @@ source "lib/ws.tcl"
 Claim the websocket library is $wsLib
 
 proc handleConnect {chan addr} {
+    $chan timeout 2000
     fileevent $chan readable [list handleRead $chan $addr]
 }
 
@@ -60,7 +61,7 @@ proc handleRead {chan addr} {
     gets $chan line; set line [string range $line 0 end-1]
     set firstline $line
 
-    puts "Http ([clock format [clock seconds] -format "%H:%M:%S"]): $chan $addr: $line"
+    # puts "Http ([clock format [clock seconds] -format "%H:%M:%S"]): $chan $addr: $line"
     set headers [list]
     while true {
         gets $chan line; set line [string range $line 0 end-1]
@@ -77,11 +78,8 @@ proc handleRead {chan addr} {
 
     if {[regexp {GET ([^ ]*) HTTP/1.1} $firstline -> path] && $path ne "/ws"} {
         set response {}
-        set handlers [Query! /someone/ wishes the web server handles route /route/ with handler /handler/]
         try {
-            foreach h $handlers {
-                set route [dict get $h route]
-                set handler [dict get $h handler]
+            ForEach! /someone/ wishes the web server handles route /route/ with handler /handler/ {
                 if {[regexp ^$route$ $path whole_match]} {
                     set ^html [proc html {body} {dict create statusAndHeaders "HTTP/1.1 200 OK\nConnection: close\nContent-Type: text/html; charset=utf-8\n\n" body $body}]
                     set ^json [proc json {body} {dict create statusAndHeaders "HTTP/1.1 200 OK\nConnection: close\nContent-Type: application/json; charset=utf-8\n\n" body $body}]

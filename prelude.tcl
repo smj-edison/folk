@@ -17,6 +17,9 @@ proc unknown {cmdName args} {
             load /tmp/$cid.so
         }
         proc <C:$cid> {procName args} {cid} { tailcall "<C:$cid> $procName" {*}$args }
+        if {[llength $args] == 0} {
+            return
+        }
         tailcall $cmdName {*}$args
 
     } elseif {[regexp {<library:([^ ]+)>} $cmdName -> tclfile]} {
@@ -30,6 +33,15 @@ proc unknown {cmdName args} {
         set fnVarName ^$cmdName
         upvar $fnVarName fn
         if {[info exists fn]} {
+            if {[llength $fn] == 1} {
+                # fn[0] is a sealed obj that includes its own
+                # environment (probably passed through a statement)
+                # and can just be applied to args.
+                set fnObj [lindex $fn 0]
+                proc $cmdName args {fnObj} { tailcall {*}$fnObj {*}$args }
+                tailcall $cmdName {*}$args
+            }
+
             lassign $fn argNames body sourceInfo
             if {[info source $body] ne $sourceInfo} {
                 set body [info source $body {*}$sourceInfo]
@@ -125,15 +137,31 @@ proc evaluateWhenBlock {whenBody envStack} {
 
 proc fn {args} {
     if {[llength $args] == 1} {
+        set fnName [lindex $args 0]
+
+        if {[uplevel info exists $fnName]} {
+            upvar $fnName fnObj
+
+            # They want to just be able to call an existing fn that
+            # already exists in scope as a `fnName` variable.
+
+            # Create this function (both in lexical variable scope, so
+            # it can be inherited by child scopes, and in
+            # callable-function namespace) and then return.
+
+            uplevel [list set ^$fnName [list $fnObj]]
+            proc $fnName args {fnObj} { tailcall {*}$fnObj {*}$args }
+            return
+        }
+
         # They just want to capture an existing fn + env as a
         # self-contained value, to share in a statement or
         # whatever. This is a pretty slow operation.
 
+        upvar ^$fnName fn
+
         # TODO: Probably not safe to call outside the original context
         # where the fn was defined.
-
-        set fnName [lindex $args 0]
-        upvar ^$fnName fn
 
         set envStack [uplevel captureEnvStack]
 
@@ -155,7 +183,7 @@ proc fn {args} {
                 {*}$args
         }} $fn $envStack]
     }
-    lassign $args name argNames body
+    lassign $args fnName argNames body
 
     # Creates a variable in the caller lexical env called ^$name. Our
     # custom unknown implementation will check ^$name on call.
@@ -166,7 +194,7 @@ proc fn {args} {
     # function! we don't expect people to pass it around really), so
     # the caller of this function will just rehydrate that enclosing
     # environment.
-    uplevel [list set ^$name [list $argNames $body [info source $body]]]
+    uplevel [list set ^$fnName [list $argNames $body [info source $body]]]
 
     # In case they actually want to call the fn in the same context,
     # we make a proc immediately also:
@@ -174,7 +202,7 @@ proc fn {args} {
     # We need to use tailcall here to preserve the filename/lineno
     # info for $body for some reason.
     # TODO: also capture info statics?
-    tailcall proc $name $argNames [uplevel info locals] $body
+    tailcall proc $fnName $argNames [uplevel info locals] $body
 }
 
 proc assert condition {
@@ -201,14 +229,14 @@ namespace eval ::library {
         set tclfile [file tempfile /tmp/${name}_XXXXXX].tcl
 
         set statics [lmap static $statics {list $static [uplevel set $static]}]
-        set tclcode [list apply {{tclfile statics body} {
+        set tclcode [list apply {{tclfile statics body bodySourceInfo} {
             foreach static $statics {
                 lassign $static name value
                 namespace eval ::<library:$tclfile> [list variable $name $value]
             }
-            namespace eval ::<library:$tclfile> $body
+            namespace eval ::<library:$tclfile> [info source $body {*}$bodySourceInfo]
             namespace eval ::<library:$tclfile> {namespace ensemble create}
-        }} $tclfile $statics $body]
+        }} $tclfile $statics $body [info source $body]]
 
         set tclfd [open $tclfile w]; puts $tclfd $tclcode; close $tclfd
         return "<library:$tclfile>"
@@ -256,6 +284,7 @@ proc HoldStatement! {args} {
     set key [list]
     set clause [lindex $args end]
     set keepMs 0
+    set destructorCode {}
     for {set i 0} {$i < [llength $args] - 1} {incr i} {
         set arg [lindex $args $i]
         if {$arg eq "(on"} {
@@ -272,6 +301,9 @@ proc HoldStatement! {args} {
         } elseif {$arg eq "-source"} { # e.g., -source {virtual-programs/cool.folk 3}
             incr i
             lassign [lindex $args $i] filename lineno
+        } elseif {$arg eq "-destructor"} {
+            incr i
+            set destructorCode [lindex $args $i]
         } else {
             lappend key $arg
         }
@@ -285,7 +317,7 @@ proc HoldStatement! {args} {
     set key [list $this {*}$key]
 
     tailcall HoldStatementGlobally! \
-        $key $clause $keepMs \
+        $key $clause $keepMs $destructorCode \
         $filename $lineno
 }
 proc Hold! {args} {
@@ -316,10 +348,12 @@ proc Say {args} {
     set sourceLineNumber [dict get $callerInfo line]
 
     set keepMs 0
+    set destructorCode {}
+
     set pattern [list]
     for {set i 0} {$i < [llength $args]} {incr i} {
         set term [lindex $args $i]
-        if {$term eq "(keep"} { # e.g., (keep 3ms)
+        if {$term eq {(keep}} { # e.g., (keep 3ms)
             incr i
             set keep [lindex $args $i]
             if {[string match {*ms)} $keep]} {
@@ -327,11 +361,16 @@ proc Say {args} {
             } else {
                 error "Say: invalid keep value [string range $keep 0 end-1]"
             }
+        } elseif {$term eq "-destructor"} {
+            incr i
+            set destructorCode [lindex $args $i]
         } else {
             lappend pattern $term
         }
     }
-    tailcall SayWithSource $sourceFileName $sourceLineNumber $keepMs \
+    tailcall SayWithSource $sourceFileName $sourceLineNumber \
+        $keepMs \
+        $destructorCode \
         {*}$pattern
 }
 proc Claim {args} { upvar this this; tailcall Say [expr {[info exists this] ? $this : "<unknown>"}] claims {*}$args }
@@ -412,11 +451,11 @@ proc When {args} {
 
     if {$isNegated} {
         set negateBody [list if {[llength $__matches] == 0} $body]
-        tailcall SayWithSource {*}$sourceInfo 0 \
+        tailcall SayWithSource {*}$sourceInfo 0 {} \
             when the collected matches for $pattern are /__matches/ \
             $negateBody with environment $envStack
     } else {
-        tailcall SayWithSource {*}$sourceInfo 0 \
+        tailcall SayWithSource {*}$sourceInfo 0 {} \
             when {*}$pattern $body with environment $envStack
     }
 }
@@ -460,9 +499,9 @@ proc On {event args} {
     }
 }
 
-# Query! is like QuerySimple! but with added support for & joins, and
-# it'll automatically also test the claimized pattern (with `/someone/
-# claims` prepended).
+# Query! is like QuerySimple! but with added support for
+# & joins, and it'll automatically also test the claimized pattern
+# (with `/someone/ claims` prepended).
 proc Query! {args} {
     # HACK: this (parsing &s and filling resolved vars) is mostly
     # copy-and-pasted from When.
@@ -527,6 +566,29 @@ proc Query! {args} {
         }
     }
     return $results
+}
+proc ForEach! {args} {
+    set body [lindex $args end]
+    set pattern [lreplace $args end end]
+
+    set results [Query! {*}$pattern]
+    upvar __result result
+    foreach result $results {
+        set ref [dict get $result __ref]
+        try {
+            StatementAcquire! $ref
+        } on error e {
+            continue
+        }
+
+        try {
+            uplevel [list dict with __result $body]
+        } on error {err opts} {
+            puts stderr "Error in ForEach!: $err --  $opts"
+        } finally {
+            StatementRelease! $ref
+        }
+    }
 }
 
 set ::thisNode [info hostname]

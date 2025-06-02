@@ -144,6 +144,20 @@ or (if remote machine):
 $ make remote FOLK_REMOTE_NODE=<your-remote-hostname-here>
 ```
 
+### Address Sanitizer
+
+Address Sanitizer (ASan) support can be enabled by setting the `ASAN_ENABLE` environment variable:
+
+```
+make ASAN_ENABLE=1
+```
+
+Then when running:
+
+```
+ASAN_ENABLE=1 make start
+```
+
 ### Tracy profiling
 
 To use Tracy, first do `git submodule update --init` here.
@@ -693,13 +707,13 @@ for debugging: `elfutils` (provides `eu-stack`), `google-perftools`,
 - vendor wslay?
 - ports
   - points-up port
-  - calibration process
-    - fix close-tab
 - only intern long strings?
 - ~~fix C stack traces~~
 - delay sysmon for a few seconds to reduce extra threads
-- **why does collect take 100 microseconds?**
+- ~~why does collect take 100 microseconds?~~
 - why doesn't epoch stack trace show anything in Tracy?
+- don't waste time on rerendering unchanged writable images
+- stack traces don't work inside web handlers
 
 ### editor bugs
 
@@ -713,11 +727,34 @@ for debugging: `elfutils` (provides `eu-stack`), `google-perftools`,
 - running program bugs out
   - recollect happening at weird time maybe?
 
-### strategies
-- use immortal objects
-- retain quad images, slightly larger than page size so we can draw on
-  fringes?
-- ~~put terms into hashtable on transmit~~
-- implement collect in C
-  - how to have hold-like behavior for collections? just keep a
-    collect for an arbitrary amount of time?
+### perf
+- on folk-live at home, folk2-leakfix: 160ms calibration cycle
+- on folk-live at home, folk2-shared-objects: TODO
+
+### next
+- why is calibration board off on portable system
+- ~~why does calibration glitch out~~
+- ~~REMOVE IMAGE CAP~~
+- keep 8ms didn't retract detection once, outline stuck around
+- ~~fix editor~~
+- minor memory leak
+- make calibrate retract properly when closed
+- on old folk2 with term copying:, in tracy 245 microseconds --
+  apriltags.folk:170 (collection)
+
+- ~~cannot use apriltag debugger on folk0 (which i need to fix
+  calibration, which i need to do perf testing)~~
+
+- blinking during calibrate
+- fix uncalibrated Folk message
+- ~~calibrate autorefresh doesn't work?~~
+  - ~~fix collection of negated calibration~~
+  - ~~the Hold is still around, so it hasn't been stomped, but somehow
+    its refcount hit 0 and the statement itself was reaped?~~
+- **calibrate render loop blinks out regularly**
+- **calibrate auto refresh preview is broken(?)**
+- **calibrate is off (RMSE 22)**
+  - i tried using old estimatehomography just in the calibrate step
+    but that didn't work
+  - the PROJECTOR calibration specifically seems off, the camera
+    calibration seems ok

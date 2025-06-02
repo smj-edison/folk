@@ -75,13 +75,18 @@ class C {
         #include <stdio.h>
         #include <setjmp.h>
 
-        jmp_buf __thread __onError;
+        static __thread jmp_buf __onError;
         static __thread Jim_Interp* interp;
 
         #define __ENSURE(EXPR) if (!(EXPR)) { Jim_SetResultFormatted(interp, "failed to convert argument from Tcl to C in: " #EXPR); longjmp(__onError, 0); }
         #define __ENSURE_OK(EXPR) if ((EXPR) != JIM_OK) { longjmp(__onError, 0); }
 
-        #define FOLK_ERROR(MSG) do { Jim_SetResultString(interp, MSG, -1); longjmp(__onError, 0); } while (0)
+        #define FOLK_ERROR(...) do { \
+            char __msg[1024]; snprintf(__msg, 1024, ##__VA_ARGS__); \
+            Jim_SetResultString(interp, __msg, -1); \
+            longjmp(__onError, 0); \
+          } while (0)
+        #define FOLK_ABORT() longjmp(__onError, 0)
         #define FOLK_ENSURE(EXPR) if (!(EXPR)) { Jim_SetResultString(interp, "assertion failed: " #EXPR, -1); longjmp(__onError, 0); }
         #define FOLK_CHECK(EXPR, MSG) if (!(EXPR)) { FOLK_ERROR(MSG); }
 
@@ -94,6 +99,8 @@ class C {
         }
     }
     code {}
+
+    vars {}
     procs {}
 
     objtypes {}
@@ -106,7 +113,7 @@ class C {
         int { expr {{ long _$argname; __ENSURE_OK(Jim_GetLong(interp, $obj, &_$argname)); int $argname = (int)_$argname; }}}
         double { expr {{ double $argname; __ENSURE_OK(Jim_GetDouble(interp, $obj, &$argname)); }}}
         float { expr {{ double _$argname; __ENSURE_OK(Jim_GetDouble(interp, $obj, &_$argname)); float $argname = (float)_$argname; }}}
-        bool { expr {{ bool $argname; __ENSURE_OK(Jim_GetBoolean(interp, $obj, &$argname)) }}}
+        bool { expr {{ int _$argname; __ENSURE_OK(Jim_GetBoolean(interp, $obj, &_$argname)); bool $argname = !!_$argname; }}}
         int32_t { expr {{ long _$argname; __ENSURE_OK(Jim_GetLong(interp, $obj, &_$argname)); int32_t $argname = (int)_$argname; }}}
         char { expr {{
             char $argname;
@@ -242,43 +249,33 @@ class C {
 
 # Registers a new argtype.
 C method argtype {t h} {
-    set argtypes [linsert $argtypes 0 $t [csubst {expr {{$h}}}]]
+    dict set argtypes $t [csubst {expr {{$h}}}]
 }
 # Looks up the argtype and returns C code to convert it.
 C method arg {argtype argname obj} {
-    csubst [switch $argtype $argtypes]
+    csubst [eval [dict getdef $argtypes $argtype \
+                      [dict get $argtypes default]]]
 }
 
 # Registers a new rtype.
 C method rtype {t h} {
-    set rtypes [linsert $rtypes 0 $t [csubst {expr {{$h}}}]]
+    dict set rtypes $t [csubst {expr {{$h}}}]
 }
 C method ret {rtype robj rvalue} {
-    csubst [switch $rtype $rtypes]
-}
-
-C method typedef {t newt} {
-    $self code "typedef $t $newt;"
-    set argtype $t; set rtype $t
-
-    $self argtype $newt [switch $argtype $argtypes]
-    $self rtype $newt [switch $rtype $rtypes]
+    csubst [eval [dict getdef $rtypes $rtype \
+                      [dict get $rtypes default]]]
 }
 
 C method include {h} {
-    if {[string index $h 0] eq "<"} {
-        lappend code "#include $h"
-    } else {
-        lappend code "#include \"$h\""
+    if {[llength $h] > 1} {
+        lappend code $h :extend
+        return
     }
-}
-
-C method linedirective {} {
-    set frame [info frame -2]
-    if {[dict exists $frame line] && [dict exists $frame file] &&
-        [dict get $frame line] >= 0} {
-        subst {#line [dict get $frame line] "[dict get $frame file]"}
-    } else { list }
+    if {[string index $h 0] eq "<"} {
+        lappend code "#include $h" :extend
+    } else {
+        lappend code "#include \"$h\"" :extend
+    }
 }
 
 C method code {newcode} {
@@ -289,29 +286,78 @@ C method code {newcode} {
             $newcode
         }]
     }
-    lappend code $newcode
+    lappend code $newcode :noextend
     list
+}
+
+C method define {newvars} {
+    lappend code $newvars :noextend
+
+    regsub -all -line {/\*.*?\*/} $newvars "" newvars
+    regsub -all -line {//.*$} $newvars "" newvars
+    regsub -all {=[^;]*;} $newvars "" newvars
+    regsub -all {__thread \w+} $newvars {{\0}} newvars
+    set newvars [string map {";" ""} $newvars]
+
+    foreach {vartype varname} $newvars {
+        if {[dict exists $vars $varname]} {
+            error "var already exists: $varname"
+        }
+        dict set vars $varname $vartype
+
+        if {[llength $vartype] == 2 && [lindex $vartype 0] eq "__thread"} {
+            set vartype [lindex $vartype 1]
+        }
+        lappend code [subst {
+            $vartype *${varname}_ptr() {
+                return &$varname;
+            }
+        }] :noextend
+    }
 }
 
 C method enum {type values} {
     lappend code [subst {
         typedef enum $type $type;
         enum $type {$values};
-    }]
+    }] :extend
 
     regsub -all {,} $values "" values
-    argtype $type [switch int $argtypes]
-    rtype $type [switch int $rtypes]
+    argtype $type [dict get $argtypes int]
+    rtype $type [dict get $rtypes int]
+}
+
+C method typedef {t newt {emitC true}} {
+    if {$emitC} {
+        lappend code "typedef $t $newt;" :extend
+    }
+    set argtype $t; set rtype $t
+
+    try {
+        $self argtype $newt [eval [dict getdef $argtypes $argtype \
+                                       [dict get $argtypes default]]]
+    } on error e {
+        puts stderr "C typedef: $e"
+    }
+    try {
+        $self rtype $newt [eval [dict getdef $rtypes $rtype \
+                                     [dict get $rtypes default]]]
+    } on error e {
+        puts stderr "C typedef: $e"
+    }
 }
 
 C method struct {type fields} {
     lappend code [subst {
         typedef struct $type $type;
         struct $type {$fields};
-    }]
+    }] :extend
 
     regsub -all -line {/\*.*?\*/} $fields "" fields
     regsub -all -line {//.*$} $fields "" fields
+    if {[regsub -all {\s_Atomic\s} $fields " " fields] > 0} {
+        puts stderr "C struct $type: Warning: Will ignore _Atomic for getters and setters"
+    }
     set fields [string map {";" ""} $fields]
 
     set fieldnames [list]
@@ -331,16 +377,10 @@ C method struct {type fields} {
     # (by someone else like the statement store).
     dict set objtypes $type [csubst {
         $[join [lmap fieldname $fieldnames { subst {
-            __thread Jim_Obj* k__${type}__${fieldname};
+            __thread Jim_Obj* k__${type}__${fieldname} = NULL;
         } }] "\n"]
-        void $[set type]_init(Jim_Interp* interp) {
-            $[join [lmap fieldname $fieldnames { subst {
-                k__${type}__${fieldname} = Jim_NewStringObj(interp, "$fieldname", -1);
-                Jim_IncrRefCount(k__${type}__${fieldname});
-            } }] "\n"]
-        }
+        Jim_ObjType* $[set type]_ObjType;
 
-        extern Jim_ObjType $[set type]_ObjType;
         void $[set type]_freeIntRepProc(Jim_Interp* interp, Jim_Obj *objPtr) {
             if (objPtr->internalRep.ptrIntValue.int1 == 1) {
                 free((char*)objPtr->internalRep.ptrIntValue.ptr);
@@ -364,7 +404,7 @@ C method struct {type fields} {
                 }
             }] "\n"]
             objPtr->length = snprintf(NULL, 0, format, $[join [lmap fieldname $fieldnames {expr {"Jim_String(robj_$fieldname)"}}] ", "]);
-            objPtr->bytes = (char *) malloc(objPtr->length + 1);
+            objPtr->bytes = (char *) Jim_Alloc(objPtr->length + 1);
             snprintf(objPtr->bytes, objPtr->length + 1, format, $[join [lmap fieldname $fieldnames {expr {"Jim_String(robj_$fieldname)"}}] ", "]);
             $[join [lmap {fieldtype fieldname} $fields {
                 csubst {
@@ -373,12 +413,16 @@ C method struct {type fields} {
             }] "\n"]
         }
         int $[set type]_setFromAnyProc(Jim_Interp *interp, Jim_Obj *objPtr) {
-            if (objPtr->typePtr == &$[set type]_ObjType) { return JIM_OK; }
+            if (objPtr->typePtr == $[set type]_ObjType) { return JIM_OK; }
 
             $[set type] *robj = ($[set type] *)malloc(sizeof($[set type]));
             $[join [lmap {fieldtype fieldname} $fields {
                 csubst {
                     Jim_Obj* obj_$fieldname;
+                    if (k__$[set type]__$fieldname == NULL) {
+                        k__${type}__${fieldname} = Jim_NewStringObj(interp, "$fieldname", -1);
+                        Jim_IncrRefCount(k__${type}__${fieldname});
+                    }
                     __ENSURE_OK(Jim_DictKey(interp, objPtr, k__$[set type]__$fieldname, &obj_$fieldname, JIM_ERRMSG));
 
                     $[$self arg $fieldtype robj_$fieldname obj_${fieldname}]
@@ -387,18 +431,30 @@ C method struct {type fields} {
             }] "\n"]
 
             Jim_FreeIntRep(interp, objPtr);
-            objPtr->typePtr = &$[set type]_ObjType;
+            objPtr->typePtr = $[set type]_ObjType;
             objPtr->internalRep.ptrIntValue.ptr = robj;
             objPtr->internalRep.ptrIntValue.int1 = 1;
             return JIM_OK;
         }
-        Jim_ObjType $[set type]_ObjType = (Jim_ObjType) {
-            .name = "$type",
-            .freeIntRepProc = $[set type]_freeIntRepProc,
-            .dupIntRepProc = $[set type]_dupIntRepProc,
-            .updateStringProc = $[set type]_updateStringProc
-            // .setFromAnyProc = $[set type]_setFromAnyProc
-        };
+
+        void $[set type]_init(Jim_Interp* interp, const char* cid) {
+            $[set type]_ObjType = malloc(sizeof(Jim_ObjType));
+            *$[set type]_ObjType = (Jim_ObjType) {
+                .name = "$type",
+                .freeIntRepProc = $[set type]_freeIntRepProc,
+                .dupIntRepProc = $[set type]_dupIntRepProc,
+                .updateStringProc = $[set type]_updateStringProc
+                // .setFromAnyProc = $[set type]_setFromAnyProc
+            };
+
+            char script[1000];
+            snprintf(script, 1000,
+                     "dict set {::<C:%s> __addrs} $[set type]_setFromAnyProc %p\n"
+                     "dict set {::<C:%s> __addrs} $[set type]_ObjType %p",
+                     cid, &$[set type]_setFromAnyProc,
+                     cid, $[set type]_ObjType);
+            Jim_Eval(interp, script);
+        }
     }]
 
     $self argtype $type [csubst {
@@ -410,7 +466,7 @@ C method struct {type fields} {
     $self rtype $type {
         $robj = Jim_NewObj(interp);
         $robj->bytes = NULL;
-        $robj->typePtr = &$[set rtype]_ObjType;
+        $robj->typePtr = $[set rtype]_ObjType;
         $robj->internalRep.ptrIntValue.ptr = malloc(sizeof($[set rtype]));
         $robj->internalRep.ptrIntValue.int1 = 1;
         memcpy($robj->internalRep.ptrIntValue.ptr, &$rvalue, sizeof($[set rtype]));
@@ -462,7 +518,7 @@ C method struct {type fields} {
 }
 
 C method proc {name arguments rtype body} {
-    set cname [string map {":" "_"} $name]
+    set cname [string map {":" "_" "!" "_"} $name]
     lassign [info source $body] filename line
     set body [uplevel 2 [list csubst $body]]
 
@@ -533,16 +589,56 @@ C method compile {{cid {}}} {
     }
 
     set init [subst {
+        #include <string.h>
+
+        #ifdef __cplusplus
+        \}
+        #include <atomic>
+        static std::atomic<const char*> __cInfo = NULL;
+        extern "C" \{
+        #else
+        static const char* _Atomic __cInfo = NULL;
+        #endif
+
+        static int __setCInfo_Cmd(Jim_Interp* interp, int objc, Jim_Obj* const objv\[\]) {
+            if (__cInfo != NULL || objc != 2) { return JIM_ERR; }
+            const char* cInfo = Jim_String(objv\[1\]);
+            if (cInfo == NULL) { return JIM_ERR; }
+            __cInfo = strdup(cInfo);
+            return JIM_OK;
+        }
+        static __thread Jim_Obj* __cInfoObj = NULL;
+        static int __getCInfo_Cmd(Jim_Interp* interp, int objc, Jim_Obj* const objv\[\]) {
+            if (__cInfo == NULL || objc != 1) { return JIM_ERR; }
+            if (__cInfoObj == NULL) {
+                __cInfoObj = Jim_NewStringObj(interp, __cInfo, -1);
+                Jim_IncrRefCount(__cInfoObj);
+            }
+            Jim_SetResult(interp, __cInfoObj);
+            return JIM_OK;
+        }
+
         int Jim_${cid}Init(Jim_Interp* intp) {
             interp = intp;
 
+            Jim_CreateCommand(interp, "<C:$cid> __setCInfo", __setCInfo_Cmd, NULL, NULL);
+            Jim_CreateCommand(interp, "<C:$cid> __getCInfo", __getCInfo_Cmd, NULL, NULL);
+
+            [join [lmap varname [dict keys $vars] {
+                csubst {{
+                    char script[1000];
+                    snprintf(script, 1000, "dict set {::<C:$cid> __addrs} ${varname}_ptr %p", &${varname}_ptr);
+                    Jim_Eval(interp, script);
+                }}
+            }] "\n"]
+
             [join [lmap name [dict keys $procs] {
-                set cname [string map {":" "_"} $name]
+                set cname [string map {":" "_" "!" "_"} $name]
                 set tclname $name
                 # puts "Creating C command: $tclname"
                 csubst {{
                     char script[1000];
-                    snprintf(script, 1000, "$self eval {dict set addrs $cname %p}", $cname);
+                    snprintf(script, 1000, "dict set {::<C:$cid> __addrs} $cname %p", $cname);
                     Jim_Eval(interp, script);
 
                     Jim_CreateCommand(interp, "<C:$cid> $tclname", $[set cname]_Cmd, NULL, NULL);
@@ -550,7 +646,7 @@ C method compile {{cid {}}} {
             }] "\n"]
 
             [join [lmap type [dict keys $objtypes] { subst {
-                ${type}_init(interp);
+                ${type}_init(interp, "$cid");
             } }] "\n"]
             return JIM_OK;
         }
@@ -570,7 +666,7 @@ extern "C" \{
                               $prelude \
                               $unexternC \
                               \
-                              {*}$code \
+                              {*}[lmap {snippet extend} $code {set snippet}] \
                               \
                               $externC \
                               {*}[dict values $objtypes] \
@@ -590,26 +686,104 @@ extern "C" \{
     if {[__isTracyEnabled]} {
         lappend cflags -DTRACY_ENABLE=1
     }
-    exec $compiler -Wall -g -fno-omit-frame-pointer -fPIC \
-        {*}$cflags $cfile -c -o [file rootname $cfile].o
-    # HACK: Why do we need this / only when running in lldb?
-    while {![file exists [file rootname $cfile].o]} { sleep 0.0001 }
+    set asan_flags {}
+    if {[info exists ::env(ASAN_ENABLE)] && $::env(ASAN_ENABLE) != ""} {
+        set asan_flags "-fsanitize=address -fsanitize-recover=address"
+    }
+    try {
+        exec $compiler {*}$asan_flags -g -fno-omit-frame-pointer -fPIC \
+            {*}$cflags $cfile -c -o [file rootname $cfile].o
+    } trap CHILDSTATUS {errOut opts} {
+        puts "\n\n=== Error compiling $cfile: ===\n$errOut\n\n"
+    }
 
-    exec $compiler -shared $ignoreUnresolved \
-        -o /tmp/$cid.so [file rootname $cfile].o \
-        {*}$endcflags
     # HACK: Why do we need this / only when running in lldb?
-    while {![file exists /tmp/$cid.so]} { sleep 0.0001 }
+    set n 0
+    while {![file exists [file rootname $cfile].o]} {
+        sleep 0.01
+        incr n
+        if {$n > 1000} { error "Failed on $cfile! Timed out" }
+    }
+
+    try {
+        exec $compiler {*}$asan_flags -shared $ignoreUnresolved \
+            -o /tmp/$cid.so [file rootname $cfile].o \
+            {*}$endcflags
+    } on error e {}
+    # HACK: Why do we need this / only when running in lldb?
+    set n 0
+    while {![file exists /tmp/$cid.so]} {
+        sleep 0.01
+        incr n
+        if {$n > 10} { error "Failed! [string range $e 0 500]" }
+    }
+
+    set cInfo [dict create]
+    foreach varName [$self vars] {
+        dict set cInfo $varName [$self get $varName]
+    }
+    
+    # Load the compiled module immediately so we can set its C info.
+    <C:$cid>
+    <C:$cid> __setCInfo $cInfo
 
     return <C:$cid>
 }
 
-C method import {scc sname as dest} {
-    set procinfo [dict get [$scc eval {set procs}] $sname]
+C method import {srclib srcname {_as {}} {destname {}}} {
+    if {$destname eq ""} { set destname $srcname }
+
+    set procinfo [dict get [$srclib __getCInfo] procs $srcname]
     set rtype [dict get $procinfo rtype]
     set arglist [dict get $procinfo arglist]
-    set addr [dict get [$scc eval {set addrs}] $sname]
-    $self code "$rtype (*$dest) ([join $arglist {, }]) = ($rtype (*) ([join $arglist {, }])) $addr;"
+
+    set addr [dict get [set "::$srclib __addrs"] $srcname]
+    $self code "$rtype (*$destname) ([join $arglist {, }]) = ($rtype (*) ([join $arglist {, }])) $addr;"
+}
+
+C method string_toupper_first {s} {
+    return [string toupper [string index $s 0]][string range $s 1 end]
+}
+C method extend {args} {
+    set noprocs false
+    foreach arg $args {
+        if {$arg eq "-noprocs"} {
+            set noprocs true
+        } else {
+            set srclib $arg
+        }
+    }
+    set srcinfo [$srclib __getCInfo]
+    set srcaddrs [set "::$srclib __addrs"]
+
+    foreach {snippet extend} [dict get $srcinfo code] {
+        if {$extend eq ":extend"} {
+            lappend code $snippet :noextend
+        }
+    }
+
+    set argtypes [dict merge [dict get $srcinfo argtypes] $argtypes]
+    set rtypes [dict merge [dict get $srcinfo rtypes] $rtypes]
+    dict for {objtype _} [dict get $srcinfo objtypes] {
+        $self code "int (*${objtype}_setFromAnyProc)(Jim_Interp *interp, Jim_Obj *objPtr) = \
+(int (*)(Jim_Interp *interp, Jim_Obj *objPtr)) \
+[dict get $srcaddrs ${objtype}_setFromAnyProc];"
+        $self code "Jim_ObjType* ${objtype}_ObjType = (Jim_ObjType*) [dict get $srcaddrs ${objtype}_ObjType];"
+    }
+
+    if {!$noprocs} {
+        foreach procName [dict keys [dict get $srcinfo procs]] {
+            $self import $srclib $procName
+        }
+    }
+
+    dict for {varname vartype} [dict get $srcinfo vars] {
+        set addr [dict get $srcaddrs ${varname}_ptr]
+        if {[llength $vartype] == 2 && [lindex $vartype 0] eq "__thread"} {
+            set vartype [lindex $vartype 1]
+        }
+        $self code "$vartype* (*${varname}_ptr)() = ($vartype* (*)()) $addr;"
+    }
 }
 
 proc ::C++ {} {

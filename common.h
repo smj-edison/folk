@@ -33,6 +33,7 @@ typedef pthread_mutex_t Mutex;
 typedef struct ThreadControlBlock {
     int index;
     pid_t _Atomic tid;
+    pthread_t pthread;
 
     WorkQueue* workQueue;
 
@@ -52,6 +53,10 @@ typedef struct ThreadControlBlock {
 
     // Current match being constructed (if applicable).
     Match* currentMatch;
+
+    // FOR DEBUGGING:
+    int _Atomic _allocs;
+    int _Atomic _frees;
 } ThreadControlBlock;
 
 #define THREADS_MAX 100
