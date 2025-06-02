@@ -113,7 +113,7 @@ class C {
         int { expr {{ long _$argname; __ENSURE_OK(Jim_GetLong(interp, $obj, &_$argname)); int $argname = (int)_$argname; }}}
         double { expr {{ double $argname; __ENSURE_OK(Jim_GetDouble(interp, $obj, &$argname)); }}}
         float { expr {{ double _$argname; __ENSURE_OK(Jim_GetDouble(interp, $obj, &_$argname)); float $argname = (float)_$argname; }}}
-        bool { expr {{ bool $argname; __ENSURE_OK(Jim_GetBoolean(interp, $obj, &$argname)) }}}
+        bool { expr {{ int _$argname; __ENSURE_OK(Jim_GetBoolean(interp, $obj, &_$argname)); bool $argname = !!_$argname; }}}
         int32_t { expr {{ long _$argname; __ENSURE_OK(Jim_GetLong(interp, $obj, &_$argname)); int32_t $argname = (int)_$argname; }}}
         char { expr {{
             char $argname;
@@ -691,11 +691,12 @@ extern "C" \{
         set asan_flags "-fsanitize=address -fsanitize-recover=address"
     }
     try {
-        exec $compiler {*}$asan_flags -Wall -g -fno-omit-frame-pointer -fPIC \
+        exec $compiler {*}$asan_flags -g -fno-omit-frame-pointer -fPIC \
             {*}$cflags $cfile -c -o [file rootname $cfile].o
-    } on error e {
-        puts stderr $e
+    } trap CHILDSTATUS {errOut opts} {
+        puts "\n\n=== Error compiling $cfile: ===\n$errOut\n\n"
     }
+
     # HACK: Why do we need this / only when running in lldb?
     set n 0
     while {![file exists [file rootname $cfile].o]} {

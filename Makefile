@@ -20,7 +20,7 @@ folk: workqueue.o db.o trie.o sysmon.o epoch.o cache.o folk.o \
 		$(CFLAGS) $(TRACY_CFLAGS) \
 		-L./vendor/jimtcl \
 		$^ \
-		-ljim -lm -lssl -lcrypto -lz
+		-lm -lssl -lcrypto -lz
 	if [ "$$(uname)" = "Darwin" ]; then \
 		dsymutil $@; \
 	fi
@@ -71,7 +71,7 @@ kill-folk:
 		while sudo kill -0 $$OLD_PID; do sleep 0.2; done; \
 	fi
 
-FOLK_REMOTE_NODE := folk-live
+FOLK_REMOTE_NODE := folk@folk-peridot.local
 sync:
 	rsync --timeout=15 -e "ssh -o StrictHostKeyChecking=no" --archive \
 		--include='**.gitignore' --exclude='/.git' --filter=':- .gitignore' \

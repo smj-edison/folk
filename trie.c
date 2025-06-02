@@ -92,7 +92,10 @@ static const Trie* trieAddImpl(const Trie* trie,
     int j;
     for (j = 0; j < trie->branchesCount; j++) {
         const Trie* branch = trie->branches[j];
-        if (branch == NULL) { break; }
+        if (branch == NULL) { 
+            fprintf(stderr, "should be unreachable\n");
+            abort();
+        }
 
         if (branch->key == term || strcmp(branch->key, term) == 0) {
             break;
