@@ -9,7 +9,7 @@ constraint cmd namespace
 # TODO:
 # debug-invstr doesn't work the same with shared objects,
 # disable for now
-# constraint cmd {debug invstr}
+constraint cmd debug-invstr 0
 
 test dupobj-1 {duplicate script object} {
 	set y {expr 2}

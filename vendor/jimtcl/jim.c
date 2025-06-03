@@ -5587,7 +5587,7 @@ void Jim_FreeInterp(Jim_Interp *i)
     }
 
     /* Must be done before freeing singletons */
-    Jim_FreeHashTable(&i->commands, &i);
+    Jim_FreeHashTable(&i->commands, i);
 
     Jim_DecrRefCount(i->emptyObj);
     Jim_DecrRefCount(i->trueObj);
@@ -13705,13 +13705,9 @@ static int Jim_DebugCoreCommand(Jim_Interp *interp, int argc, Jim_Obj *const *ar
             Jim_SetResultString(interp, "[debug objects] not implemented", -1);
             return JIM_ERR;
 
-        case OPT_INVSTR:{
-            Jim_Obj *objPtr = argv[2];
-            if (objPtr->typePtr != NULL)
-                Jim_InvalidateStringRep(objPtr);
-            Jim_SetEmptyResult(interp);
-            return JIM_OK;
-        }
+        case OPT_INVSTR:
+            Jim_SetResultString(interp, "[debug invstr] not implemented", -1);
+            return JIM_ERR;
 
         case OPT_SHOW:{
             const char *s;
