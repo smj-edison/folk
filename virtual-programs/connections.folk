@@ -63,7 +63,7 @@ When /anyone/ wishes /source/ is dynamically connected to /sink/ /...options/ & 
      for {set p $offset} {$p < $distance} {incr p $spacing} {
         set c [vec2 add $source [vec2 scale $direction $p]]
         set s [expr {min($maxsize, 0.20*min($p, $distance - $p))}]
-        Wish to draw a shape with sides 3 center $c radius $s radians $angle color $color filled true layer $layer
+        Wish to draw a shape with sides 3 center $c radius $s angle $angle color $color filled true layer $layer
       }
     }
 }

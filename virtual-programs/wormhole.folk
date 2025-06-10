@@ -1,0 +1,32 @@
+
+When /entry/ is a wormhole entry {
+  When /nobody/ claims $entry has exit /anything/ {
+    # see if $entry + 1 is an exit, and if so, use it
+    When [+ $entry 1] is a wormhole exit {
+      Hold selected-exit:$entry {
+        Claim $entry has exit [+ $entry 1]
+      }
+    }
+    
+    # else let the user manually select an exit
+    When $entry points up at /exit/ & /exit/ is a wormhole exit {
+      Hold selected-exit:$entry {
+        Claim $entry has exit $exit
+      }
+    }
+
+    Wish $entry is labelled "No exit\nselected"
+    Wish $entry is outlined red
+  }
+  
+  When $entry has exit /exit/ {
+    Wish $entry is dynamically connected to $exit
+    
+    # pass pointer through
+    When /pointer/ points /dir/ with length /len/ at $entry &\
+         $exit points /dir/ with length /len/ at /pointee/ {
+      Claim $pointer points $dir at $pointee
+      Claim $pointer points $dir with length /len/ at $pointee
+    }
+  }
+}
