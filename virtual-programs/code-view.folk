@@ -38,27 +38,9 @@ When /view/ is a code view with /...options/ {
   set options [dict merge $defaults $options]
 
   # reset selected program when it's not pointing at any program (or pointing at a wormhole)
-  When $view points up at /anything/ {} ;# trigger When when for pointing
-  When the collected matches for [list /somebody/ claims $view points up at /program/] are /matches/ {
-    set selectedProgram ""
-
-    foreach match $matches {
-      set program [dict get $match program]
-      set wormholeMatches [Statements::findMatches [list /somebody/ claims $program is a wormhole entry]]
-      set isWormhole [expr {[llength $wormholeMatches] > 0}]
-
-      if {!$isWormhole} {
-        set selectedProgram $program
-      }
-    }
-
-    if {$selectedProgram != ""} {
-      Hold selected-program:$view {
-        Claim $view has selected program $program
-      }
-    } else {
-      Hold selected-program:$view {}
-    }
+  When $view points up at /program/ &\
+       /nobody/ claims /program/ is a wormhole entry {
+    Claim $view has selected program $program
   }
 
   # load in defaults for the view if it hasn't been initialized
