@@ -8,6 +8,7 @@
 #include <stdatomic.h>
 #include <inttypes.h>
 #include <signal.h>
+#include <setjmp.h>
 
 #if __has_include ("tracy/TracyC.h")
 #include "tracy/TracyC.h"
@@ -81,7 +82,11 @@ void appropriateWorkQueuePush(WorkQueueItem item) {
     globalWorkQueuePush(item);
 }
 
+// These are used by dynamically-loaded Tcl-C modules, especially for
+// error handling.
 __thread Jim_Interp* interp = NULL;
+__thread jmp_buf __onError;
+
 __thread Cache* cache = NULL;
 
 Db* db;
@@ -89,8 +94,22 @@ Db* db;
 static Clause* jimObjsToClause(int objc, Jim_Obj *const *objv) {
     Clause* clause = malloc(SIZEOF_CLAUSE(objc));
     clause->nTerms = objc;
+
+    const char* str;
+    char* newStr;
+    int len;
     for (int i = 0; i < objc; i++) {
-        clause->terms[i] = strdup(Jim_GetString(objv[i], NULL));
+        // Jim "strings" are not guaranteed to be null terminated,
+        // as they're effectively byte arrays. We'll go ahead and
+        // terminate it ourselves in the case that this object is
+        // not terminated.
+        
+        str = Jim_GetString(objv[i], &len);
+        newStr = malloc(len + 1); // +1 for null cap
+        memcpy(newStr, str, len);
+        newStr[len] = 0x00;
+        
+        clause->terms[i] = newStr;
     }
     return clause;
 }
@@ -313,6 +332,7 @@ static StatementRef Say(Clause* clause, long keepMs, const char *destructorCode,
 }
 
 static int SayWithSourceFunc(Jim_Interp *interp, int argc, Jim_Obj *const *argv) {
+    assert(argc >= 6);
     Clause* clause = jimObjsToClauseWithCaching(argc - 5, argv + 5);
 
     const char* sourceFileName;
@@ -658,6 +678,11 @@ static void runWhenBlock(StatementRef whenRef, Clause* whenPattern, StatementRef
         // A parent is gone. Abort.
         Jim_DecrRefCount(interp, envStackObj);
         Jim_DecrRefCount(interp, bodyObj);
+
+        statementRelease(db, when);
+        if (stmt != NULL) {
+            statementRelease(db, stmt);
+        }
         return;
     }
 
