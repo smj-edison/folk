@@ -2231,7 +2231,7 @@ Jim_Obj *Jim_NewObj(Jim_Interp *interp, int onTempList)
         objPtr = Jim_Alloc(sizeof(*objPtr));
     }
 
-    objPtr->interp = interp;
+    objPtr->interpId = interp->interpId;
     objPtr->refCount = onTempList ? 1 : 0;
 
     /* All the other fields are left uninitialized to save time.
@@ -5244,15 +5244,27 @@ static Jim_Obj *JimDictExpandArrayVariable(Jim_Interp *interp, Jim_Obj *varObjPt
         return NULL;
     }
 
+    int isDictShared = Jim_IsShared(dictObjPtr);
+    if (isDictShared) {
+        dictObjPtr = Jim_DuplicateObj(interp, dictObjPtr, JIM_LIVE_LIST);
+        Jim_IncrRefCount(dictObjPtr);
+    }
+
     ret = Jim_DictKey(interp, dictObjPtr, keyObjPtr, &resObjPtr, JIM_NONE);
     if (ret != JIM_OK) {
         Jim_SetResultFormatted(interp,
             "can't read \"%#s(%#s)\": %s array", varObjPtr, keyObjPtr,
             ret < 0 ? "variable isn't" : "no such element in");
     }
-    else if ((flags & JIM_UNSHARED) && Jim_IsShared(dictObjPtr)) {
-        /* Update the variable to have an unshared copy */
-        Jim_SetVariable(interp, varObjPtr, Jim_DuplicateObj(interp, dictObjPtr, JIM_LIVE_LIST));
+    else if ((flags & JIM_UNSHARED) && isDictShared) {
+        /* Update the variable to have the new unshared copy */
+        Jim_SetVariable(interp, varObjPtr, dictObjPtr);
+    }
+
+    if (isDictShared) {
+        // clean up the duplicated dict if we didn't end up using it
+        // (potentially not passed to Jim_SetVariable)
+        Jim_DecrRefCount(dictObjPtr);
     }
 
     return resObjPtr;

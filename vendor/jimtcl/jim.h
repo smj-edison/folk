@@ -293,7 +293,7 @@ typedef struct Jim_Obj {
     const struct Jim_ObjType *typePtr; /* object type. */
     atomic_int refCount; /* reference count */
     int length; /* number of bytes in 'bytes', not including the null term. */
-    struct Jim_Interp *interp; /* parent interpreter */
+    unsigned long long interpId; /* parent interpreter */
     /* Internal representation union */
     union {
         /* integer number type */
@@ -372,7 +372,7 @@ typedef struct Jim_Obj {
     (atomic_load_explicit(&((objPtr)->refCount), memory_order_relaxed) > 1)
 
 #define Jim_SameInterp(interp, objPtr) \
-    ((interp)->interpId == (objPtr)->interp->interpId)
+    ((interp)->interpId == (objPtr)->interpId)
 
 /* This macro is used when we allocate a new object using
  * Jim_New...Obj(), but for some error we need to destroy it.
