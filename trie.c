@@ -21,6 +21,7 @@ void clauseFree(Clause* c) {
     free(c);
 }
 
+// Use for debugging only. Does not handle tcl edge cases
 char* clauseToString(Clause* c) {
     if (c == NULL) {
         return strdup("<null clause>");

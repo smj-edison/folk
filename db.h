@@ -3,6 +3,7 @@
 
 #include <pthread.h>
 
+#include "jim.h"
 #include "trie.h"
 
 typedef struct Statement Statement;
@@ -49,7 +50,9 @@ bool statementCheck(Db* db, StatementRef ref);
 
 StatementRef statementRef(Db* db, Statement* stmt);
 
-Clause* statementClause(Statement* stmt);
+Clause* jimClauseToTrieClause(Jim_Interp* interp, Jim_Obj* obj);
+Jim_Obj* statementJimClause(Statement* stmt);
+Clause* statementTrieClause(Statement* stmt);
 char* statementSourceFileName(Statement* stmt);
 int statementSourceLineNumber(Statement* stmt);
 
@@ -102,10 +105,11 @@ ResultSet* dbQuery(Db* db, Clause* pattern);
 // which then becomes responsible for freeing it later. Pass a null
 // MatchRef if this is an assertion. Returns a null StatementRef if no
 // new statement was created. 
-StatementRef dbInsertOrReuseStatement(Db* db, Clause* clause, long keepMs,
+StatementRef dbInsertOrReuseStatement(Db* db, Jim_Interp* interp,
+                                      Jim_Obj* jimClause, long keepMs,
                                       Destructor* destructor,
                                       const char* sourceFileName, int sourceLineNumber,
-                                      MatchRef parent,
+                                      MatchRef parentMatchRef,
                                       StatementRef* outReusedStatementRef);
 
 // Call when you're about to begin a match (i.e., evaluating the body
@@ -123,9 +127,9 @@ void dbRetractStatements(Db* db, Clause* pattern);
 // previous version. Note: once you call this, clause ownership
 // transfers to the DB, and it is responsible for freeing the clause
 // later.
-StatementRef dbHoldStatement(Db* db,
+StatementRef dbHoldStatement(Db* db, Jim_Interp* interp,
                              const char* key, double version,
-                             Clause* clause, long keepMs,
+                             Jim_Obj* jimClause, long keepMs,
                              Destructor* destructor,
                              const char* sourceFileName, int sourceLineNumber,
                              StatementRef* outOldStatement);

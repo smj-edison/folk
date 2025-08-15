@@ -209,7 +209,7 @@ void sysmonScheduleRemoveAfter(StatementRef stmtRef, int afterMs) {
         fprintf(stderr, "sysmon: Ran out of remove-later slots!");
         for (int i = 0; i < REMOVE_LATER_MAX; i++) {
             fprintf(stderr, "  %d: (%.200s)\n", i,
-                    clauseToString(statementClause(statementAcquire(db, removeLater[i].stmt))));
+                    clauseToString(statementTrieClause(statementAcquire(db, removeLater[i].stmt))));
         }
         exit(1);
     }
