@@ -288,10 +288,18 @@ typedef struct Jim_HashTableIterator {
  * ---------------------------------------------------------------------------*/
 struct Jim_Interp;
 
+#ifdef __cplusplus
+}
+#endif
+
 typedef struct Jim_Obj {
     char *bytes; /* string representation buffer. NULL = no string repr. */
     const struct Jim_ObjType *typePtr; /* object type. */
+#ifdef __cplusplus
+    std::atomic<int> refCount;
+#else
     atomic_int refCount; /* reference count */
+#endif
     int length; /* number of bytes in 'bytes', not including the null term. */
     unsigned long long interpId; /* parent interpreter */
     /* Internal representation union */
@@ -361,6 +369,10 @@ typedef struct Jim_Obj {
         } scriptLineValue;
     } internalRep;
 } Jim_Obj;
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 /* Jim_Obj related macros */
 #define Jim_IncrRefCount(objPtr) \
