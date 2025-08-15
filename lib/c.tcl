@@ -129,9 +129,9 @@ class C {
         size_t { expr {{ size_t $argname; __ENSURE_OK(Jim_GetLong(interp, $obj, (long *)&$argname)); }}}
         intptr_t { expr {{ intptr_t $argname; __ENSURE_OK(Jim_GetLong(interp, $obj, (long *)&$argname)); }}}
         uint16_t { expr {{ uint16_t $argname; __ENSURE_OK(Jim_GetLong(interp, $obj, (int *)&$argname)); }}}
-        uint32_t { expr {{ uint32_t $argname; __ENSURE(sscanf(Jim_String($obj), "%" PRIu32, &$argname) == 1); }}}
-        uint64_t { expr {{ uint64_t $argname; __ENSURE(sscanf(Jim_String($obj), "%" PRIu64, &$argname) == 1); }}}
-        char* { expr {{ char* $argname = (char*) Jim_String($obj); }} }
+        uint32_t { expr {{ uint32_t $argname; __ENSURE(sscanf(interp, Jim_String(interp, $obj), "%" PRIu32, &$argname) == 1); }}}
+        uint64_t { expr {{ uint64_t $argname; __ENSURE(sscanf(interp, Jim_String(interp, $obj), "%" PRIu64, &$argname) == 1); }}}
+        char* { expr {{ char* $argname = (char*) Jim_String(interp, $obj); }} }
         Jim_Obj* { expr {{ Jim_Obj* $argname = $obj; }}}
         default {
             if {[string index $argtype end] == "*"} {
@@ -140,7 +140,7 @@ class C {
                     expr {{
                         $argtype $argname;
                         // First, try to read the obj as a raw pointer.
-                        if (sscanf(Jim_String($obj), "($argtype) 0x%p", &$argname) != 1) {
+                        if (sscanf(Jim_String(interp, $obj), "($argtype) 0x%p", &$argname) != 1) {
                             // No? Then try to coerce to a Tcl object.
 #if $[dict exists $objtypes $basetype]
                                 __ENSURE_OK($[set basetype]_setFromAnyProc(interp, $obj));
@@ -153,13 +153,13 @@ class C {
                 } else {
                     expr {{
                         $argtype $argname;
-                        __ENSURE(sscanf(Jim_String($obj), "($argtype) 0x%p", &$argname) == 1);
+                        __ENSURE(sscanf(Jim_String(interp, $obj), "($argtype) 0x%p", &$argname) == 1);
                     }}
                 }
             } elseif {[regexp {(^[^\[]+)\[(\d*)\]$} $argtype -> basetype arraylen]} {
                 # note: arraylen can be ""
                 if {$basetype eq "char"} { expr {{
-                    char $argname[$arraylen]; memcpy($argname, Jim_String($obj), $arraylen);
+                    char $argname[$arraylen]; memcpy($argname, Jim_String(interp, $obj), $arraylen);
                 }} } else { expr {{
                     int $[set argname]_objc = Jim_ListLength(interp, $obj);
                     $basetype $argname[$[set argname]_objc];
@@ -401,9 +401,9 @@ C method struct {type fields} {
                     $[$self ret $fieldtype robj_$fieldname robj->$fieldname]
                 }
             }] "\n"]
-            objPtr->length = snprintf(NULL, 0, format, $[join [lmap fieldname $fieldnames {expr {"Jim_String(robj_$fieldname)"}}] ", "]);
+            objPtr->length = snprintf(NULL, 0, format, $[join [lmap fieldname $fieldnames {expr {"Jim_String(interp, robj_$fieldname)"}}] ", "]);
             objPtr->bytes = (char *) Jim_Alloc(objPtr->length + 1);
-            snprintf(objPtr->bytes, objPtr->length + 1, format, $[join [lmap fieldname $fieldnames {expr {"Jim_String(robj_$fieldname)"}}] ", "]);
+            snprintf(objPtr->bytes, objPtr->length + 1, format, $[join [lmap fieldname $fieldnames {expr {"Jim_String(interp, robj_$fieldname)"}}] ", "]);
             $[join [lmap {fieldtype fieldname} $fields {
                 csubst {
                     Jim_FreeNewObj(interp, robj_$fieldname);
@@ -600,7 +600,7 @@ C method compile {{cid {}}} {
 
         static int __setCInfo_Cmd(Jim_Interp* interp, int objc, Jim_Obj* const objv\[\]) {
             if (__cInfo != NULL || objc != 2) { return JIM_ERR; }
-            const char* cInfo = Jim_String(objv\[1\]);
+            const char* cInfo = Jim_String(interp, objv\[1\]);
             if (cInfo == NULL) { return JIM_ERR; }
             __cInfo = strdup(cInfo);
             return JIM_OK;

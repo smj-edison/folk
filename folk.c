@@ -551,7 +551,7 @@ static int __concludeFunc(Jim_Interp *interp, int argc, Jim_Obj *const *argv) {
 
 static void interpBoot() {
     interp = Jim_CreateInterp();
-    cache = cacheNew(interp);
+    cache = cacheNew();
     Jim_RegisterCoreCommands(interp);
     Jim_InitStaticExtensions(interp);
 

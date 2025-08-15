@@ -24,7 +24,7 @@ $cc code {
         int keyLen = Jim_Length(patternObj);
         char *collectKey = malloc(collectLen + keyLen + 1);
         memcpy(collectKey, COLLECT, collectLen);
-        memcpy(collectKey + collectLen, Jim_String(patternObj), keyLen + 1);
+        memcpy(collectKey + collectLen, Jim_String(interp, patternObj), keyLen + 1);
         return collectKey;
     }
 
@@ -41,7 +41,7 @@ $cc proc Recollect! {Jim_Obj* patternObj} void {
     collectorPattern->terms[3] = strdup("collect");
     collectorPattern->terms[4] = strdup("matches");
     collectorPattern->terms[5] = strdup("for");
-    collectorPattern->terms[6] = strdup(Jim_String(patternObj));
+    collectorPattern->terms[6] = strdup(Jim_String(interp, patternObj));
 
     Jim_Obj* collectorsObj = QuerySimple(collectorPattern);
     if (Jim_ListLength(interp, collectorsObj) == 0) {
@@ -70,9 +70,9 @@ $cc proc Recollect! {Jim_Obj* patternObj} void {
         collectedClause->terms[3] = strdup("collected");
         collectedClause->terms[4] = strdup("matches");
         collectedClause->terms[5] = strdup("for");
-        collectedClause->terms[6] = strdup(Jim_String(patternObj));
+        collectedClause->terms[6] = strdup(Jim_String(interp, patternObj));
         collectedClause->terms[7] = strdup("are");
-        collectedClause->terms[8] = strdup(Jim_String(matchesObj));
+        collectedClause->terms[8] = strdup(Jim_String(interp, matchesObj));
 
         Jim_DecrRefCount(interp, matchesObj);
 
