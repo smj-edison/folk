@@ -2449,6 +2449,27 @@ static void JimSetStringBytes(Jim_Obj *objPtr, const char *str)
     objPtr->length = strlen(str);
 }
 
+/* these used to be macros, but it's annoying to import
+   stdatomic.h every time you want to call one of these */
+inline void Jim_IncrRefCount(Jim_Obj *objPtr) {
+    atomic_fetch_add_explicit(&(objPtr->refCount), 1, memory_order_relaxed);
+}
+
+inline void Jim_DecrRefCount(Jim_Obj *objPtr) {
+    int res = atomic_fetch_sub_explicit(&(objPtr->refCount), 1, memory_order_release);
+
+    if (res == 0) {
+        Jim_FreeObj(objPtr);
+    }
+}
+
+inline int Jim_IsShared(Jim_Obj *objPtr) {
+    return atomic_load_explicit(&(objPtr->refCount), memory_order_relaxed) > 1;
+}
+
+inline int Jim_SameInterp(Jim_Interp *interp, Jim_Obj *objPtr) {
+    return interp->interpId == objPtr->interpId;
+}
 
 static void FreeDictSubstInternalRep(Jim_Obj *objPtr);
 static void DupDictSubstInternalRep(Jim_Interp *interp, Jim_Obj *srcPtr, Jim_Obj *dupPtr);
@@ -4007,12 +4028,12 @@ static void JimDecrCmdRefCount(Jim_Interp *interp, Jim_Cmd *cmdPtr)
  */
 static void JimIncrVarRef(Jim_VarVal *vv)
 {
-    atomic_fetch_add_explicit(&(vv->refCount), 1, memory_order_relaxed);
+    vv->refCount++;
 }
 
 static void JimDecrVarRef(Jim_VarVal *vv)
 {
-    int newRefCount = atomic_fetch_sub_explicit(&(vv->refCount), 1, memory_order_release);
+    int newRefCount = --vv->refCount;
     if (newRefCount == 0) {
         if (vv->objPtr) {
             Jim_DecrRefCount(vv->objPtr);

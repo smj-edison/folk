@@ -66,6 +66,8 @@
 #define __JIM__H
 
 #ifdef __cplusplus
+#include <atomic>
+
 extern "C" {
 #endif
 
@@ -374,17 +376,12 @@ typedef struct Jim_Obj {
 extern "C" {
 #endif
 
-/* Jim_Obj related macros */
-#define Jim_IncrRefCount(objPtr) \
-    atomic_fetch_add_explicit(&((objPtr)->refCount), 1, memory_order_relaxed)
-#define Jim_DecrRefCount(objPtr) \
-    do { int res = atomic_fetch_sub_explicit(&((objPtr)->refCount), 1, memory_order_release); \
-         if (res == 0) { Jim_FreeObj(objPtr); } } while(0)
-#define Jim_IsShared(objPtr) \
-    (atomic_load_explicit(&((objPtr)->refCount), memory_order_relaxed) > 1)
-
-#define Jim_SameInterp(interp, objPtr) \
-    ((interp)->interpId == (objPtr)->interpId)
+/* these used to be macros, but it's annoying to import
+   stdatomic.h every time you want to call one of these */
+void Jim_IncrRefCount(Jim_Obj *objPtr);
+void Jim_DecrRefCount(Jim_Obj *objPtr);
+int Jim_IsShared(Jim_Obj *objPtr);
+int Jim_SameInterp(struct Jim_Interp *interp, Jim_Obj *objPtr);
 
 /* This macro is used when we allocate a new object using
  * Jim_New...Obj(), but for some error we need to destroy it.
@@ -486,7 +483,7 @@ typedef struct Jim_EvalFrame {
 typedef struct Jim_VarVal {
     Jim_Obj *objPtr;
     struct Jim_CallFrame *linkFramePtr;
-    atomic_int refCount;
+    int refCount;
 } Jim_VarVal;
 
 /* The cmd structure. */
