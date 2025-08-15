@@ -367,7 +367,7 @@ typedef struct Jim_Obj {
     atomic_fetch_add_explicit(&((objPtr)->refCount), 1, memory_order_relaxed)
 #define Jim_DecrRefCount(objPtr) \
     do { int res = atomic_fetch_sub_explicit(&((objPtr)->refCount), 1, memory_order_release); \
-         if (res <= 0) { Jim_FreeObj(objPtr); } } while(0)
+         if (res == 0) { Jim_FreeObj(objPtr); } } while(0)
 #define Jim_IsShared(objPtr) \
     (atomic_load_explicit(&((objPtr)->refCount), memory_order_relaxed) > 1)
 
@@ -756,7 +756,7 @@ JIM_EXPORT void Jim_InvalidateStringRep (Jim_Obj *objPtr);
 JIM_EXPORT Jim_Obj * Jim_DuplicateObj (Jim_Interp *interp,
         Jim_Obj *objPtr, int flags);
 JIM_EXPORT Jim_Obj * DupIfWrongInterp(Jim_Interp *interp, Jim_Obj *objPtr, int flags);
-JIM_EXPORT Jim_Obj * DupIfShared(Jim_Interp *interp, Jim_Obj *objPtr, int flags);
+JIM_EXPORT Jim_Obj * Jim_DupIfShared(Jim_Interp *interp, Jim_Obj *objPtr, int flags);
 JIM_EXPORT const char * Jim_GetString(Jim_Interp *interp, Jim_Obj *objPtr,
         int *lenPtr);
 JIM_EXPORT const char * Jim_GetStringUnshared(Jim_Interp *interp, Jim_Obj *objPtr,
@@ -858,6 +858,7 @@ JIM_EXPORT int Jim_GetIndex (Jim_Interp *interp, Jim_Obj *objPtr,
         int *indexPtr);
 
 /* list object */
+JIM_EXPORT int Jim_HasListInternalRep(Jim_Obj *objPtr);
 JIM_EXPORT Jim_Obj * Jim_NewListObj (Jim_Interp *interp,
         Jim_Obj *const *elements, int len);
 JIM_EXPORT void Jim_ListInsertElements (Jim_Interp *interp,

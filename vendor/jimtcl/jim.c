@@ -2328,7 +2328,7 @@ Jim_Obj *Jim_DuplicateObj(Jim_Interp *interp, Jim_Obj *objPtr, int flags)
  * FLAGS:
  * JIM_TEMP_LIST: put it on the temp list to be cleared later
  * JIM_FORCE_STRING: when duplicating it, convert it to its string representation */
-Jim_Obj *DupIfShared(Jim_Interp *interp, Jim_Obj *objPtr, int flags) {
+Jim_Obj *Jim_DupIfShared(Jim_Interp *interp, Jim_Obj *objPtr, int flags) {
     if (Jim_IsShared(objPtr)) {
         objPtr = Jim_DuplicateObj(interp, objPtr, flags);
     }
@@ -2338,7 +2338,7 @@ Jim_Obj *DupIfShared(Jim_Interp *interp, Jim_Obj *objPtr, int flags) {
 
 Jim_Obj *DupIfSharedAndWrongRep(Jim_Interp *interp, Jim_Obj *objPtr, const Jim_ObjType *typePtr, int flags) {
     if (objPtr->typePtr != typePtr) {
-        return DupIfShared(interp, objPtr, flags);
+        return Jim_DupIfShared(interp, objPtr, flags);
     }
 
     return objPtr;
@@ -2372,7 +2372,7 @@ const char *Jim_GetString(Jim_Interp *interp, Jim_Obj *objPtr, int *lenPtr)
         /* Invalid string repr. Generate it. */
         JimPanic((objPtr->typePtr->updateStringProc == NULL, "UpdateStringProc called against '%s' type.", objPtr->typePtr->name));
 
-        objPtr = DupIfShared(interp, objPtr, JIM_TEMP_LIST);
+        objPtr = Jim_DupIfShared(interp, objPtr, JIM_TEMP_LIST);
 
         objPtr->typePtr->updateStringProc(interp, objPtr);
     }
@@ -6200,7 +6200,7 @@ int Jim_GetDouble(Jim_Interp *interp, Jim_Obj *objPtr, double *doublePtr)
 {
     // TODO: optimize
     if (objPtr->typePtr != &coercedDoubleObjType && objPtr->typePtr != &doubleObjType) {
-        objPtr = DupIfShared(interp, objPtr, JIM_TEMP_LIST);
+        objPtr = Jim_DupIfShared(interp, objPtr, JIM_TEMP_LIST);
     }
 
     if (objPtr->typePtr == &coercedDoubleObjType) {
@@ -6297,6 +6297,11 @@ static const Jim_ObjType listObjType = {
     UpdateStringOfList,
     JIM_TYPE_NONE,
 };
+
+int Jim_HasListInternalRep(Jim_Obj *objPtr)
+{
+    return objPtr->typePtr == &listObjType;
+}
 
 void FreeListInternalRep(Jim_Obj *objPtr)
 {
@@ -6657,7 +6662,7 @@ static int SetListFromAnyUnshared(Jim_Interp *interp, struct Jim_Obj *objPtr)
 static Jim_Obj *GetList(Jim_Interp *interp, struct Jim_Obj *objPtr)
 {
     if (objPtr->typePtr != &listObjType) {
-        objPtr = DupIfShared(interp, objPtr, JIM_TEMP_LIST);
+        objPtr = Jim_DupIfShared(interp, objPtr, JIM_TEMP_LIST);
         SetListFromAnyUnshared(interp, objPtr);
     }
 
@@ -11030,8 +11035,8 @@ static Jim_Obj *JimInterpolateTokens(Jim_Interp *interp, const ScriptToken * tok
                 }
                 return NULL;
         }
-        intv[i] = DupIfShared(interp, intv[i], JIM_LIVE_LIST);
-        Jim_IncrRefCount(intv[i]);        
+        intv[i] = Jim_DupIfShared(interp, intv[i], JIM_LIVE_LIST);
+        Jim_IncrRefCount(intv[i]);
         totlen += Jim_Length(interp, intv[i]);
     }
 
@@ -11112,7 +11117,7 @@ static int JimEvalObjList(Jim_Interp *interp, Jim_Obj *listPtr)
 
 int Jim_EvalObjList(Jim_Interp *interp, Jim_Obj *listPtr)
 {
-    listPtr = DupIfShared(interp, listPtr, JIM_TEMP_LIST);
+    listPtr = Jim_DupIfShared(interp, listPtr, JIM_TEMP_LIST);
     SetListFromAnyUnshared(interp, listPtr);
 
     Jim_Obj *firstItem = Jim_ListGetIndex(interp, listPtr, 0);

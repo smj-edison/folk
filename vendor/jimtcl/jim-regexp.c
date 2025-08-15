@@ -198,7 +198,7 @@ int Jim_RegexpCmd(Jim_Interp *interp, int argc, Jim_Obj *const *argv)
         goto wrongNumArgs;
     }
 
-    Jim_Obj* regexObjPtr = DupIfShared(interp, argv[i], JIM_TEMP_LIST);
+    Jim_Obj* regexObjPtr = Jim_DupIfShared(interp, argv[i], JIM_TEMP_LIST);
     regex = SetRegexpFromAnyUnshared(interp, regexObjPtr, regcomp_flags);
     if (!regex) {
         return JIM_ERR;
