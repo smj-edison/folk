@@ -1,0 +1,408 @@
+Running test: test/backtrace.folk (1/22)
+--------------------
+Warning: Creating unparented Say (when we are on 
+    When the time is /t/ {
+        if {$t % 5 == 0} {
+            errorMakingProc
+  )
+Ran test: test/backtrace.folk (1/22): ❌ failed
+
+Running test: test/bool.folk (2/22)
+--------------------
+
+
+
+
+
+
+cc -Wall -g -fno-omit-frame-pointer -fPIC -I./vendor/jimtcl /tmp/cfileKr3cBJ.c -c -o /tmp/cfileKr3cBJ.o
+
+
+
+
+
+
+
+workerSpawn
+folk: db.c:914: dbInsertOrReuseStatement: Assertion `Jim_HasListInternalRep(jimClause)' failed.
+Ran test: test/bool.folk (2/22): ❌ failed
+
+Running test: test/c.folk (3/22)
+--------------------
+
+
+
+
+
+
+cc -Wall -g -fno-omit-frame-pointer -fPIC -I./vendor/jimtcl /tmp/cfile2CcGdF.c -c -o /tmp/cfile2CcGdF.o
+
+
+
+
+
+
+
+================
+
+
+
+
+
+
+cc -Wall -g -fno-omit-frame-pointer -fPIC -I./vendor/jimtcl /tmp/cfileqod3PB.c -c -o /tmp/cfileqod3PB.o
+
+
+
+
+
+
+
+main: CPU_COUNT = 16
+Ran test: test/c.folk (3/22): ✅ passed
+
+Running test: test/collect-race.folk (4/22)
+--------------------
+Warning: Creating unparented Say (when  source virtual-programs/collect.folk  with environment {this test/collect-race.folk})
+Ran test: test/collect-race.folk (4/22): ❌ failed
+
+Running test: test/cpp.folk (5/22)
+--------------------
+
+
+
+
+
+
+c++ -Wall -g -fno-omit-frame-pointer -fPIC -I./vendor/jimtcl -Wno-write-strings -std=c++11 /tmp/cfile8G0qQ3.c -c -o /tmp/cfile8G0qQ3.o
+
+
+
+
+
+
+
+main: CPU_COUNT = 16
+workerSpawn
+folk: db.c:914: dbInsertOrReuseStatement: Assertion `Jim_HasListInternalRep(jimClause)' failed.
+Ran test: test/cpp.folk (5/22): ❌ failed
+
+Running test: test/dedupe.folk (6/22)
+--------------------
+Warning: Creating unparented Say (A claims P is an editor)
+Warning: Creating unparented Say (B claims P is an editor)
+Warning: Creating unparented Say (when /p/ is an editor 
+    set x 3
+
+    When this is a test {
+        # This should be deduplicated )
+Ran test: test/dedupe.folk (6/22): ❌ failed
+
+Running test: test/dupe.folk (7/22)
+--------------------
+Ran test: test/dupe.folk (7/22): ❌ failed
+
+Running test: test/env.folk (8/22)
+--------------------
+Warning: Creating unparented Say (when 
+    set x inner-x
+    When {
+        hello
+        nested
+    }
+ with environment {this test/e)
+Ran test: test/env.folk (8/22): ❌ failed
+
+Running test: test/fn2.folk (9/22)
+--------------------
+when: 0
+Ran test: test/fn2.folk (9/22): ❌ failed
+
+Running test: test/fn3.folk (10/22)
+--------------------
+Ran test: test/fn3.folk (10/22): ❌ failed
+
+Running test: test/fn.folk (11/22)
+--------------------
+Warning: Creating unparented Say (when we are awake 
+        try {
+            hello
+        } on error e {
+            set st [info s)
+Warning: Creating unparented Say (test/fn.folk claims we are awake)
+Ran test: test/fn.folk (11/22): ❌ failed
+
+Running test: test/homography.folk (12/22)
+--------------------
+
+
+
+
+
+
+cc -Wall -g -fno-omit-frame-pointer -fPIC -I./vendor/jimtcl -I./vendor/apriltag -I./vendor/cmpfit /tmp/cfileoveLwt.c -c -o /tmp/cfileoveLwt.o
+
+
+
+
+
+
+eval: (apply {{} {set __envStack [list]; set this {test/homography.folk}; source {test/homography.folk}}}) -> (lib/c.tcl:713: Error: /tmp/cfileoveLwt.c: In function ‘matd_freeIntRepProc’:
+/tmp/cfileoveLwt.c:49:38: error: invalid use of incomplete typedef ‘Jim_Obj’
+   49 |         matd_destroy((matd_t*) objPtr->internalRep.ptr);
+      |                                      ^~
+/tmp/cfileoveLwt.c: In function ‘matd_dupIntRepProc’:
+/tmp/cfileoveLwt.c:52:15: error: invalid use of incomplete typedef ‘Jim_Obj’
+   52 |         dupPtr->internalRep.ptr = (void*) matd_copy((matd_t*) srcPtr->internalRep.ptr);
+      |               ^~
+/tmp/cfileoveLwt.c:52:69: error: invalid use of incomplete typedef ‘Jim_Obj’
+   52 |         dupPtr->internalRep.ptr = (void*) matd_copy((matd_t*) srcPtr->internalRep.ptr);
+      |                                                                     ^~
+/tmp/cfileoveLwt.c: In function ‘matd_updateStringProc’:
+/tmp/cfileoveLwt.c:55:39: error: invalid use of incomplete typedef ‘Jim_Obj’
+   55 |         matd_t *mat = (matd_t *)objPtr->internalRep.ptr;
+      |                                       ^~
+/tmp/cfileoveLwt.c:57:15: error: invalid use of incomplete typedef ‘Jim_Obj’
+   57 |         objPtr->bytes = Jim_Alloc(mat->nrows * (1 + mat->ncols * 26 + 1));
+      |               ^~
+/tmp/cfileoveLwt.c:58:25: error: invalid use of incomplete typedef ‘Jim_Obj’
+   58 |         char *s = objPtr->bytes;
+      |                         ^~
+/tmp/cfileoveLwt.c:71:15: error: invalid use of incomplete typedef ‘Jim_Obj’
+   71 |         objPtr->length = strlen(s);
+      |               ^~
+/tmp/cfileoveLwt.c: In function ‘matd_setFromAnyProc’:
+/tmp/cfileoveLwt.c:94:15: error: invalid use of incomplete typedef ‘Jim_Obj’
+   94 |         objPtr->typePtr = &matd_ObjType;
+      |               ^~
+/tmp/cfileoveLwt.c:95:15: error: invalid use of incomplete typedef ‘Jim_Obj’
+   95 |         objPtr->internalRep.ptr = mat;
+      |               ^~
+/tmp/cfileoveLwt.c: At top level:
+/tmp/cfileoveLwt.c:100:27: error: initialization of ‘void (*)(struct Jim_Obj *)’ from incompatible pointer type ‘void (*)(Jim_Interp *, Jim_Obj *)’ [-Wincompatible-pointer-types]
+  100 |         .freeIntRepProc = matd_freeIntRepProc,
+      |                           ^~~~~~~~~~~~~~~~~~~
+/tmp/cfileoveLwt.c:100:27: note: (near initialization for ‘(anonymous).freeIntRepProc’)
+/tmp/cfileoveLwt.c:48:10: note: ‘matd_freeIntRepProc’ declared here
+   48 |     void matd_freeIntRepProc(Jim_Interp *interp, Jim_Obj *objPtr) {
+      |          ^~~~~~~~~~~~~~~~~~~
+/tmp/cfileoveLwt.c:102:29: error: initialization of ‘void (*)(struct Jim_Interp *, struct Jim_Obj *)’ from incompatible pointer type ‘void (*)(Jim_Obj *)’ [-Wincompatible-pointer-types]
+  102 |         .updateStringProc = matd_updateStringProc,
+      |                             ^~~~~~~~~~~~~~~~~~~~~
+/tmp/cfileoveLwt.c:102:29: note: (near initialization for ‘(anonymous).updateStringProc’)
+/tmp/cfileoveLwt.c:54:10: note: ‘matd_updateStringProc’ declared here
+   54 |     void matd_updateStringProc(Jim_Obj *objPtr) {
+      |          ^~~~~~~~~~~~~~~~~~~~~
+/tmp/cfileoveLwt.c: In function ‘computeNormalizer_Cmd’:
+/tmp/cfileoveLwt.c:217:12: error: too few arguments to function ‘Jim_NewObj’; expected 2, have 1
+  217 |     robj = Jim_NewObj(interp);
+      |            ^~~~~~~~~~
+In file included from /tmp/cfileoveLwt.c:7:
+./vendor/jimtcl/jim.h:667:22: note: declared here
+  667 | JIM_EXPORT Jim_Obj * Jim_NewObj (Jim_Interp *interp, int onTempList);
+      |                      ^~~~~~~~~~
+/tmp/cfileoveLwt.c:218:9: error: invalid use of incomplete typedef ‘Jim_Obj’
+  218 |     robj->bytes = NULL;
+      |         ^~
+/tmp/cfileoveLwt.c:219:9: error: invalid use of incomplete typedef ‘Jim_Obj’
+  219 |     robj->typePtr = &matd_ObjType;
+      |         ^~
+/tmp/cfileoveLwt.c:220:9: error: invalid use of incomplete typedef ‘Jim_Obj’
+  220 |     robj->internalRep.ptr = rvalue;
+      |         ^~
+/tmp/cfileoveLwt.c: In function ‘estimateHomographyImpl_Cmd’:
+/tmp/cfileoveLwt.c:269:12: error: too few arguments to function ‘Jim_NewObj’; expected 2, have 1
+  269 |     robj = Jim_NewObj(interp);
+      |            ^~~~~~~~~~
+./vendor/jimtcl/jim.h:667:22: note: declared here
+  667 | JIM_EXPORT Jim_Obj * Jim_NewObj (Jim_Interp *interp, int onTempList);
+      |                      ^~~~~~~~~~
+/tmp/cfileoveLwt.c:270:9: error: invalid use of incomplete typedef ‘Jim_Obj’
+  270 |     robj->bytes = NULL;
+      |         ^~
+/tmp/cfileoveLwt.c:271:9: error: invalid use of incomplete typedef ‘Jim_Obj’
+  271 |     robj->typePtr = &matd_ObjType;
+      |         ^~
+/tmp/cfileoveLwt.c:272:9: error: invalid use of incomplete typedef ‘Jim_Obj’
+  272 |     robj->internalRep.ptr = rvalue;
+      |         ^~
+/tmp/cfileoveLwt.c: In function ‘estimateHomographyBaseImpl_Cmd’:
+/tmp/cfileoveLwt.c:374:12: error: too few arguments to function ‘Jim_NewObj’; expected 2, have 1
+  374 |     robj = Jim_NewObj(interp);
+      |            ^~~~~~~~~~
+./vendor/jimtcl/jim.h:667:22: note: declared here
+  667 | JIM_EXPORT Jim_Obj * Jim_NewObj (Jim_Interp *interp, int onTempList);
+      |                      ^~~~~~~~~~
+/tmp/cfileoveLwt.c:375:9: error: invalid use of incomplete typedef ‘Jim_Obj’
+  375 |     robj->bytes = NULL;
+      |         ^~
+/tmp/cfileoveLwt.c:376:9: error: invalid use of incomplete typedef ‘Jim_Obj’
+  376 |     robj->typePtr = &matd_ObjType;
+      |         ^~
+/tmp/cfileoveLwt.c:377:9: error: invalid use of incomplete typedef ‘Jim_Obj’
+  377 |     robj->internalRep.ptr = rvalue;
+      |         ^~
+/tmp/cfileoveLwt.c: In function ‘refineHomography_Cmd’:
+/tmp/cfileoveLwt.c:432:30: error: invalid use of incomplete typedef ‘Jim_Obj’
+  432 |     H = (matd_t*) objv[1 + 2]->internalRep.ptr;
+      |                              ^~
+/tmp/cfileoveLwt.c: In function ‘applyHomography_Cmd’:
+/tmp/cfileoveLwt.c:463:30: error: invalid use of incomplete typedef ‘Jim_Obj’
+  463 |     H = (matd_t*) objv[1 + 0]->internalRep.ptr;
+      |                              ^~
+/tmp/cfileoveLwt.c: In function ‘matdMul_Cmd’:
+/tmp/cfileoveLwt.c:503:30: error: invalid use of incomplete typedef ‘Jim_Obj’
+  503 |     a = (matd_t*) objv[1 + 0]->internalRep.ptr;
+      |                              ^~
+/tmp/cfileoveLwt.c:508:30: error: invalid use of incomplete typedef ‘Jim_Obj’
+  508 |     b = (matd_t*) objv[1 + 1]->internalRep.ptr;
+      |                              ^~
+/tmp/cfileoveLwt.c:514:12: error: too few arguments to function ‘Jim_NewObj’; expected 2, have 1
+  514 |     robj = Jim_NewObj(interp);
+      |            ^~~~~~~~~~
+./vendor/jimtcl/jim.h:667:22: note: declared here
+  667 | JIM_EXPORT Jim_Obj * Jim_NewObj (Jim_Interp *interp, int onTempList);
+      |                      ^~~~~~~~~~
+/tmp/cfileoveLwt.c:515:9: error: invalid use of incomplete typedef ‘Jim_Obj’
+  515 |     robj->bytes = NULL;
+      |         ^~
+/tmp/cfileoveLwt.c:516:9: error: invalid use of incomplete typedef ‘Jim_Obj’
+  516 |     robj->typePtr = &matd_ObjType;
+      |         ^~
+/tmp/cfileoveLwt.c:517:9: error: invalid use of incomplete typedef ‘Jim_Obj’
+  517 |     robj->internalRep.ptr = rvalue;
+      |         ^~
+Traceback (most recent call last):
+  File "virtual-programs/calibrate/matlib.folk", line 249, in ::00000001
+    ::00000001 compile
+  File "oo.tcl", line 49, in ::00000001
+    {C compile}
+  File "lib/c.tcl", line 713, in C compile
+    exec cc -Wall -g -fno-omit-frame-pointer -fPIC -I./vendor/jimtcl -I./vendor/apri...)
+main: CPU_COUNT = 16
+Ran test: test/homography.folk (12/22): ❌ failed
+
+Running test: test/join.folk (13/22)
+--------------------
+main: CPU_COUNT = 16
+Ran test: test/join.folk (13/22): ✅ passed
+
+Running test: test/library.folk (14/22)
+--------------------
+workerSpawn
+folk: db.c:914: dbInsertOrReuseStatement: Assertion `Jim_HasListInternalRep(jimClause)' failed.
+Ran test: test/library.folk (14/22): ❌ failed
+
+Running test: test/patternless.folk (15/22)
+--------------------
+hello
+hello
+Ran test: test/patternless.folk (15/22): ❌ failed
+
+Running test: test/scope-pileup.folk (16/22)
+--------------------
+{ystart linecount} {
+  set yend [expr {$ystart + $linecount}]
+  set numbers [list]
+  for {set i [expr {$ystart + 1}]} {$i <= $yend} {incr i} {
+    lappend numbers $i
+  }
+  join $numbers "\n"
+} {test/scope-pileup.folk 88}
+workerSpawn
+folk: db.c:914: dbInsertOrReuseStatement: Assertion `Jim_HasListInternalRep(jimClause)' failed.
+Ran test: test/scope-pileup.folk (16/22): ❌ failed
+
+Running test: test/system.folk (17/22)
+--------------------
+Ran test: test/system.folk (17/22): ❌ failed
+
+Running test: test/test.folk (18/22)
+--------------------
+In --
+In --
+Ran test: test/test.folk (18/22): ❌ failed
+
+Running test: test/texture-churn.folk (19/22)
+--------------------
+Warning: Creating unparented Say (when the image library is /imageLib/ 
+    set cc [C]
+    $cc extend $imageLib
+    $cc include <math.)
+Warning: Creating unparented Say (test/texture-churn.folk wishes the GPU creates writable texture TEST with width 1024 height 1024)
+Warning: Creating unparented Say (test/texture-churn.folk claims test/texture-churn.folk has writable texture projection 
+    {1 0 0}
+)
+Warning: Creating unparented Say (test/texture-churn.folk claims test/texture-churn.folk has writable texture TEST with width 1024 hei)
+Warning: Creating unparented Say (test/texture-churn.folk claims test/texture-churn.folk has resolved geometry width 1 height 1 left 0)
+Warning: Creating unparented Say (when the texture-churn library is /lib/ When the clock time is /t/ {
+    # Draw an image in C.
+    #)
+Warning: Creating unparented Say (when the GPU library is /gpuLib/ When the GPU writable texture library is /gpuWritableLib/ & the GPU)
+Warning: Creating unparented Say (when  source virtual-programs/web/web.folk  with environment {this test/texture-churn.folk})
+Ran test: test/texture-churn.folk (19/22): ❌ failed
+
+Running test: test/trie.folk (20/22)
+--------------------
+
+
+
+
+
+
+cc -Wall -g -fno-omit-frame-pointer -fPIC -I./vendor/jimtcl -I. -I./vendor/tracy/public trie.o /tmp/cfilev908mo.c -c -o /tmp/cfilev908mo.o
+
+
+
+
+
+
+eval: (apply {{} {set __envStack [list]; set this {test/trie.folk}; source {test/trie.folk}}}) -> (lib/c.tcl:713: Error: /tmp/cfilev908mo.c: In function ‘jimObjToClause’:
+/tmp/cfilev908mo.c:194:53: error: passing argument 1 of ‘Jim_GetString’ from incompatible pointer type [-Wincompatible-pointer-types]
+  194 |             clause->terms[i] = strdup(Jim_GetString(termObj, NULL));
+      |                                                     ^~~~~~~
+      |                                                     |
+      |                                                     Jim_Obj *
+In file included from /tmp/cfilev908mo.c:7:
+./vendor/jimtcl/jim.h:674:51: note: expected ‘Jim_Interp *’ but argument is of type ‘Jim_Obj *’
+  674 | JIM_EXPORT const char * Jim_GetString(Jim_Interp *interp, Jim_Obj *objPtr,
+      |                                       ~~~~~~~~~~~~^~~~~~
+/tmp/cfilev908mo.c:194:39: error: too few arguments to function ‘Jim_GetString’; expected 3, have 2
+  194 |             clause->terms[i] = strdup(Jim_GetString(termObj, NULL));
+      |                                       ^~~~~~~~~~~~~
+./vendor/jimtcl/jim.h:674:25: note: declared here
+  674 | JIM_EXPORT const char * Jim_GetString(Jim_Interp *interp, Jim_Obj *objPtr,
+      |                         ^~~~~~~~~~~~~
+Traceback (most recent call last):
+  File "virtual-programs/web/trie-graph.folk", line 1
+    apply {{} {...
+  File "virtual-programs/web/trie-graph.folk", line 136, in ::00000001
+    ::00000001 compile
+  File "oo.tcl", line 49, in ::00000001
+    {C compile}
+  File "lib/c.tcl", line 713, in C compile
+    exec cc -Wall -g -fno-omit-frame-pointer -fPIC -I./vendor/jimtcl -I. -I./vendor/...)
+main: CPU_COUNT = 16
+Ran test: test/trie.folk (20/22): ❌ failed
+
+Running test: test/writable-image.folk (21/22)
+--------------------
+Warning: Creating unparented Say (when display /disp/ has width /w/ height /h/ 
+    When the clock time is /t/ {
+        Wish to draw )
+Warning: Creating unparented Say (when page /p/ is out 
+    Wish the GPU creates writable texture [list im $p] with width 1024 height )
+Warning: Creating unparented Say (when the GPU library is /gpuLib/ When the GPU writable texture library is /gpuDrawableLib/ & the GPU)
+Warning: Creating unparented Say (when 
+    sleep 5
+    Retract! page 3 is out
+ with environment {this test/writable-image.folk})
+Ran test: test/writable-image.folk (21/22): ❌ failed
+
+Running test: test/ws.folk (22/22)
+--------------------
+Warning: Creating unparented Say (when 
+    source "virtual-programs/web/web.folk"
+ with environment {this test/ws.folk})
+Ran test: test/ws.folk (22/22): ❌ failed
+

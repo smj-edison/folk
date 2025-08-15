@@ -98,6 +98,7 @@ class C {
             return Jim_NewStringObj(interp, buf, -1);
         }
     }
+    codeType "C"
     code {}
 
     vars {}
@@ -129,9 +130,9 @@ class C {
         size_t { expr {{ size_t $argname; __ENSURE_OK(Jim_GetLong(interp, $obj, (long *)&$argname)); }}}
         intptr_t { expr {{ intptr_t $argname; __ENSURE_OK(Jim_GetLong(interp, $obj, (long *)&$argname)); }}}
         uint16_t { expr {{ uint16_t $argname; __ENSURE_OK(Jim_GetLong(interp, $obj, (int *)&$argname)); }}}
-        uint32_t { expr {{ uint32_t $argname; __ENSURE(sscanf(Jim_String($obj), "%" PRIu32, &$argname) == 1); }}}
-        uint64_t { expr {{ uint64_t $argname; __ENSURE(sscanf(Jim_String($obj), "%" PRIu64, &$argname) == 1); }}}
-        char* { expr {{ char* $argname = (char*) Jim_String($obj); }} }
+        uint32_t { expr {{ uint32_t $argname; __ENSURE(sscanf(Jim_String(interp, $obj), "%" PRIu32, &$argname) == 1); }}}
+        uint64_t { expr {{ uint64_t $argname; __ENSURE(sscanf(Jim_String(interp, $obj), "%" PRIu64, &$argname) == 1); }}}
+        char* { expr {{ char* $argname = (char*) Jim_String(interp, $obj); }} }
         Jim_Obj* { expr {{ Jim_Obj* $argname = $obj; }}}
         default {
             if {[string index $argtype end] == "*"} {
@@ -140,7 +141,7 @@ class C {
                     expr {{
                         $argtype $argname;
                         // First, try to read the obj as a raw pointer.
-                        if (sscanf(Jim_String($obj), "($argtype) 0x%p", &$argname) != 1) {
+                        if (sscanf(Jim_String(interp, $obj), "($argtype) 0x%p", &$argname) != 1) {
                             // No? Then try to coerce to a Tcl object.
 #if $[dict exists $objtypes $basetype]
                                 __ENSURE_OK($[set basetype]_setFromAnyProc(interp, $obj));
@@ -153,13 +154,13 @@ class C {
                 } else {
                     expr {{
                         $argtype $argname;
-                        __ENSURE(sscanf(Jim_String($obj), "($argtype) 0x%p", &$argname) == 1);
+                        __ENSURE(sscanf(Jim_String(interp, $obj), "($argtype) 0x%p", &$argname) == 1);
                     }}
                 }
             } elseif {[regexp {(^[^\[]+)\[(\d*)\]$} $argtype -> basetype arraylen]} {
                 # note: arraylen can be ""
                 if {$basetype eq "char"} { expr {{
-                    char $argname[$arraylen]; memcpy($argname, Jim_String($obj), $arraylen);
+                    char $argname[$arraylen]; memcpy($argname, Jim_String(interp, $obj), $arraylen);
                 }} } else { expr {{
                     int $[set argname]_objc = Jim_ListLength(interp, $obj);
                     $basetype $argname[$[set argname]_objc];
@@ -284,12 +285,15 @@ C method code {newcode} {
     lassign [info source $newcode] filename line
     if {$filename ne ""} { 
         set newcode [subst {
-            #line $line "$filename"
             $newcode
         }]
     }
     lappend code $newcode :noextend
     list
+}
+
+C method codeType {newCodeType} {
+    set codeType $newCodeType
 }
 
 C method define {newvars} {
@@ -368,7 +372,6 @@ C method struct {type fields} {
         lset fields $i+1 $fieldname
     }
 
-    $self include <string.h>
     # ptrAndLongRep.value = 1 means the data is owned by
     # the Jim_ObjType and should be freed by this
     # code. value = 0 means the data is owned externally
@@ -401,9 +404,9 @@ C method struct {type fields} {
                     $[$self ret $fieldtype robj_$fieldname robj->$fieldname]
                 }
             }] "\n"]
-            objPtr->length = snprintf(NULL, 0, format, $[join [lmap fieldname $fieldnames {expr {"Jim_String(robj_$fieldname)"}}] ", "]);
+            objPtr->length = snprintf(NULL, 0, format, $[join [lmap fieldname $fieldnames {expr {"Jim_String(interp, robj_$fieldname)"}}] ", "]);
             objPtr->bytes = (char *) Jim_Alloc(objPtr->length + 1);
-            snprintf(objPtr->bytes, objPtr->length + 1, format, $[join [lmap fieldname $fieldnames {expr {"Jim_String(robj_$fieldname)"}}] ", "]);
+            snprintf(objPtr->bytes, objPtr->length + 1, format, $[join [lmap fieldname $fieldnames {expr {"Jim_String(interp, robj_$fieldname)"}}] ", "]);
             $[join [lmap {fieldtype fieldname} $fields {
                 csubst {
                     Jim_FreeNewObj(interp, robj_$fieldname);
@@ -555,7 +558,7 @@ C method proc {name arguments rtype body} {
     dict set procs $name code [subst {
         static $decayedRtype $cname ([join $arglist ", "]) {
             [if {$filename ne ""} {
-                subst {#line $line "$filename"}
+                list
             } else {list}]
             $body
         }
@@ -587,20 +590,21 @@ C method compile {{cid {}}} {
     }
 
     set init [subst {
-        #include <string.h>
-
         #ifdef __cplusplus
         \}
         #include <atomic>
-        static std::atomic<const char*> __cInfo = NULL;
+        static std::atomic<const char*> __cInfo(nullptr);
+
         extern "C" \{
         #else
-        static const char* _Atomic __cInfo = NULL;
+        static const char* _Atomic __cInfo;
         #endif
+
+        #include <string.h>
 
         static int __setCInfo_Cmd(Jim_Interp* interp, int objc, Jim_Obj* const objv\[\]) {
             if (__cInfo != NULL || objc != 2) { return JIM_ERR; }
-            const char* cInfo = Jim_String(objv\[1\]);
+            const char* cInfo = Jim_String(interp, objv\[1\]);
             if (cInfo == NULL) { return JIM_ERR; }
             __cInfo = strdup(cInfo);
             return JIM_OK;
@@ -669,6 +673,7 @@ extern "C" \{
 \}
 #endif
 }]
+    set isC [expr {$codeType == "C"}]
     set sourcecode [join [list \
                               $externC \
                               $prelude \
@@ -676,9 +681,11 @@ extern "C" \{
                               \
                               {*}[lmap {snippet extend} $code {set snippet}] \
                               \
-                              $externC \
+                              [if {$isC} { set externC } else { }] \
                               {*}[dict values $objtypes] \
                               {*}[lmap p [dict values $procs] {dict get $p code}] \
+                              [if {$isC} { set unexternC } else { }] \
+                              $externC \
                               $init \
                               $unexternC \
                              ] "\n"]
@@ -698,6 +705,11 @@ extern "C" \{
     if {[info exists ::env(ASAN_ENABLE)] && $::env(ASAN_ENABLE) != ""} {
         set asan_flags "-fsanitize=address -fsanitize-recover=address"
     }
+
+    puts "\n\n\n\n\n"
+    puts [list $compiler {*}$asan_flags -Wall -g -fno-omit-frame-pointer -fPIC \
+                 {*}$cflags $cfile -c -o [file rootname $cfile].o]
+    puts "\n\n\n\n\n"
     set out [exec $compiler {*}$asan_flags -Wall -g -fno-omit-frame-pointer -fPIC \
                  {*}$cflags $cfile -c -o [file rootname $cfile].o]
     puts $out
@@ -796,6 +808,7 @@ C method extend {args} {
 
 proc ::C++ {} {
     set cpp [C]
+    $cpp codeType "C++"
     $cpp eval [list set compiler c++]
     $cpp cflags -Wno-write-strings
     return $cpp

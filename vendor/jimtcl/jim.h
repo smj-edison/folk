@@ -936,6 +936,10 @@ JIM_EXPORT int Jim_AioFilehandle(Jim_Interp *interp, Jim_Obj *command);
 JIM_EXPORT int Jim_IsDict(Jim_Obj *objPtr);
 JIM_EXPORT int Jim_IsList(Jim_Obj *objPtr);
 
+#ifdef __cplusplus
+}
+#endif
+
 #endif /* __JIM__H */
 
 /*
