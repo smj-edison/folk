@@ -145,11 +145,11 @@ static int BinaryEncode64(Jim_Interp *interp, int objc, Jim_Obj *const objv[])
     }
 
 	if (count == 0) {
-        Jim_SetEmptyResult(interp, JIM_LIVE_LIST);
+        Jim_SetEmptyResult(interp);
         return JIM_OK;
 	}
 
-    resultObj = Jim_NewObj(interp);
+    resultObj = Jim_NewObj(interp, JIM_LIVE_LIST);
     resultObj->typePtr = NULL;
     
 	unsigned char *cursor = NULL;
@@ -259,7 +259,7 @@ static int BinaryDecode64(Jim_Interp *interp, int objc, Jim_Obj *const objv[])
     dataend = data + count;
     size = ((count + 3) & ~3) * 3 / 4;
     if (size == 0) {
-        Jim_FreeNewObj(interp, resultObj);
+        Jim_FreeNewObj(resultObj);
         Jim_SetEmptyResult(interp);
         return JIM_OK;
     }
