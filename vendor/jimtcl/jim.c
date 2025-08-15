@@ -2241,6 +2241,20 @@ Jim_Obj *Jim_NewObj(Jim_Interp *interp, int onTempList)
     return objPtr;
 }
 
+Jim_Obj *Jim_NewObjNoInterp()
+{
+    Jim_Obj *objPtr = Jim_Alloc(sizeof(*objPtr));
+
+    objPtr->interpId = 0;
+    objPtr->refCount = 0;
+
+    /* All the other fields are left uninitialized to save time.
+     * The caller will probably want to set them to the right
+     * value anyway. */
+
+    return objPtr;
+}
+
 /* Free an object. Actually objects are never freed, but
  * just moved to the free objects list, where they will be
  * reused by Jim_NewObj(). */
@@ -2585,6 +2599,27 @@ int Jim_Utf8Length(Jim_Interp *interp, Jim_Obj *objPtr)
 Jim_Obj *Jim_NewStringObj(Jim_Interp *interp, const char *s, int len)
 {
     Jim_Obj *objPtr = Jim_NewObj(interp, JIM_LIVE_LIST);
+
+    /* Need to find out how many bytes the string requires */
+    if (len == -1)
+        len = strlen(s);
+    /* Alloc/Set the string rep. */
+    if (len == 0) {
+        objPtr->bytes = JimEmptyStringRep;
+    }
+    else {
+        objPtr->bytes = Jim_StrDupLen(s, len);
+    }
+    objPtr->length = len;
+
+    /* No typePtr field for the vanilla string object. */
+    objPtr->typePtr = NULL;
+    return objPtr;
+}
+
+Jim_Obj *Jim_NewStringObjNoInterp(const char *s, int len)
+{
+    Jim_Obj *objPtr = Jim_NewObjNoInterp();
 
     /* Need to find out how many bytes the string requires */
     if (len == -1)
@@ -5544,7 +5579,7 @@ int Jim_IsBigEndian(void)
 /* -----------------------------------------------------------------------------
  * Interpreter related functions
  * ---------------------------------------------------------------------------*/
-unsigned long long _Atomic currentInterpId = 0;
+unsigned long long _Atomic currentInterpId = 1;
 
 Jim_Interp *Jim_CreateInterp(void)
 {
@@ -6695,6 +6730,24 @@ Jim_Obj *Jim_NewListObj(Jim_Interp *interp, Jim_Obj *const *elements, int len)
     Jim_Obj *objPtr;
 
     objPtr = Jim_NewObj(interp, JIM_LIVE_LIST);
+    objPtr->typePtr = &listObjType;
+    objPtr->bytes = NULL;
+    objPtr->internalRep.listValue.ele = NULL;
+    objPtr->internalRep.listValue.len = 0;
+    objPtr->internalRep.listValue.maxLen = 0;
+
+    if (len) {
+        ListInsertElements(objPtr, 0, len, elements);
+    }
+
+    return objPtr;
+}
+
+Jim_Obj *Jim_NewListObjNoInterp(Jim_Obj *const *elements, int len)
+{
+    Jim_Obj *objPtr;
+
+    objPtr = Jim_NewObjNoInterp();
     objPtr->typePtr = &listObjType;
     objPtr->bytes = NULL;
     objPtr->internalRep.listValue.ele = NULL;

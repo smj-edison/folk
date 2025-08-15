@@ -179,7 +179,6 @@ extern "C" {
 #define JIM_LIVE_LIST        0
 #define JIM_TEMP_LIST        1
 #define JIM_FORCE_STRING     2
-#define JIM_NO_REF_INCR      4
 
 #define JIM_LIBPATH "auto_path"
 #define JIM_INTERACTIVE "tcl_interactive"
@@ -760,6 +759,7 @@ JIM_EXPORT Jim_HashEntry * Jim_NextHashEntry
 
 /* objects */
 JIM_EXPORT Jim_Obj * Jim_NewObj (Jim_Interp *interp, int onTempList);
+JIM_EXPORT Jim_Obj * Jim_NewObjNoInterp ();
 JIM_EXPORT void Jim_FreeObj (Jim_Obj *objPtr);
 JIM_EXPORT void Jim_InvalidateStringRep (Jim_Obj *objPtr);
 JIM_EXPORT Jim_Obj * Jim_DuplicateObj (Jim_Interp *interp,
@@ -777,6 +777,7 @@ JIM_EXPORT int Jim_LengthUnshared(Jim_Interp *interp, Jim_Obj *objPtr);
 /* string object */
 JIM_EXPORT Jim_Obj * Jim_NewStringObj (Jim_Interp *interp,
         const char *s, int len);
+JIM_EXPORT Jim_Obj * Jim_NewStringObjNoInterp (const char *s, int len);
 JIM_EXPORT Jim_Obj *Jim_NewStringObjUtf8(Jim_Interp *interp,
         const char *s, int charlen);
 JIM_EXPORT Jim_Obj * Jim_NewStringObjNoAlloc (Jim_Interp *interp,
@@ -867,9 +868,10 @@ JIM_EXPORT int Jim_GetIndex (Jim_Interp *interp, Jim_Obj *objPtr,
         int *indexPtr);
 
 /* list object */
-JIM_EXPORT int Jim_HasListInternalRep(Jim_Obj *objPtr);
+JIM_EXPORT int Jim_HasListInternalRep (Jim_Obj *objPtr);
 JIM_EXPORT Jim_Obj * Jim_NewListObj (Jim_Interp *interp,
         Jim_Obj *const *elements, int len);
+JIM_EXPORT Jim_Obj * Jim_NewListObjNoInterp (Jim_Obj *const *elements, int len);
 JIM_EXPORT void Jim_ListInsertElements (Jim_Interp *interp,
         Jim_Obj *listPtr, int listindex, int objc, Jim_Obj *const *objVec);
 JIM_EXPORT void Jim_ListAppendElement (Jim_Interp *interp,
