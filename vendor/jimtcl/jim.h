@@ -73,7 +73,6 @@ extern "C" {
 #include <limits.h>
 #include <stdlib.h> /* In order to export the Jim_Free() macro */
 #include <stdarg.h> /* In order to get type va_list */
-#include <stdatomic.h>
 
 /* -----------------------------------------------------------------------------
  * System configuration
@@ -288,91 +287,11 @@ typedef struct Jim_HashTableIterator {
  * ---------------------------------------------------------------------------*/
 struct Jim_Interp;
 
-typedef struct Jim_Obj {
-    char *bytes; /* string representation buffer. NULL = no string repr. */
-    const struct Jim_ObjType *typePtr; /* object type. */
-    atomic_int refCount; /* reference count */
-    int length; /* number of bytes in 'bytes', not including the null term. */
-    unsigned long long interpId; /* parent interpreter */
-    /* Internal representation union */
-    union {
-        /* integer number type */
-        jim_wide wideValue;
-        /* generic integer value (e.g. index, return code) */
-        int intValue;
-        /* double number type */
-        double doubleValue;
-        /* Generic pointer */
-        void *ptr;
-        /* Generic two pointers value */
-        struct {
-            void *ptr1;
-            void *ptr2;
-        } twoPtrValue;
-        /* Generic pointer, int, int value */
-        struct {
-            void *ptr;
-            int int1;
-            int int2;
-        } ptrIntValue;
-        /* Variable object */
-        struct {
-            struct Jim_VarVal *vv;
-            unsigned long callFrameId; /* for caching */
-            int global; /* If the variable name is globally scoped with :: */
-        } varValue;
-        /* Command object */
-        struct {
-            struct Jim_Obj *nsObj;
-            struct Jim_Cmd *cmdPtr;
-            unsigned long procEpoch; /* for caching */
-        } cmdValue;
-        /* List object */
-        struct {
-            struct Jim_Obj **ele;    /* Elements vector */
-            int len;        /* Length */
-            int maxLen;        /* Allocated 'ele' length */
-        } listValue;
-        /* dict object */
-        struct Jim_Dict *dictValue;
-        /* String type */
-        struct {
-            int maxLength;
-            int charLength;     /* utf-8 char length. -1 if unknown */
-        } strValue;
-        /* Reference type */
-        struct {
-            unsigned long id;
-            struct Jim_Reference *refPtr;
-        } refValue;
-        /* Source type */
-        struct {
-            struct Jim_Obj *fileNameObj;
-            int lineNumber;
-        } sourceValue;
-        /* Dict substitution type */
-        struct {
-            struct Jim_Obj *varNameObjPtr;
-            struct Jim_Obj *indexObjPtr;
-        } dictSubstValue;
-        struct {
-            int line;
-            int argc;
-        } scriptLineValue;
-    } internalRep;
-} Jim_Obj;
+/* Moved to jim-private.h to make it opaque (for C++ interop) */
+struct Jim_Obj;
+typedef struct Jim_Obj Jim_Obj;
 
 /* Jim_Obj related macros */
-#define Jim_IncrRefCount(objPtr) \
-    atomic_fetch_add_explicit(&((objPtr)->refCount), 1, memory_order_relaxed)
-#define Jim_DecrRefCount(objPtr) \
-    do { int res = atomic_fetch_sub_explicit(&((objPtr)->refCount), 1, memory_order_release); \
-         if (res == 0) { Jim_FreeObj(objPtr); } } while(0)
-#define Jim_IsShared(objPtr) \
-    (atomic_load_explicit(&((objPtr)->refCount), memory_order_relaxed) > 1)
-
-#define Jim_SameInterp(interp, objPtr) \
-    ((interp)->interpId == (objPtr)->interpId)
 
 /* This macro is used when we allocate a new object using
  * Jim_New...Obj(), but for some error we need to destroy it.
@@ -474,7 +393,7 @@ typedef struct Jim_EvalFrame {
 typedef struct Jim_VarVal {
     Jim_Obj *objPtr;
     struct Jim_CallFrame *linkFramePtr;
-    atomic_int refCount;
+    int refCount;
 } Jim_VarVal;
 
 /* The cmd structure. */
@@ -540,12 +459,7 @@ typedef struct Jim_PrngState {
     unsigned int i, j;
 } Jim_PrngState;
 
-/* simple bump allocator for temp objects */
-#define JIM_TEMP_LIST_SIZE (512 * 1024)
-typedef struct Jim_TempList {
-    size_t length;
-    Jim_Obj objects[JIM_TEMP_LIST_SIZE];
-} Jim_TempList;
+struct Jim_TempList;
 
 /* -----------------------------------------------------------------------------
  * Jim interpreter structure.
@@ -949,6 +863,13 @@ JIM_EXPORT int Jim_CheckShowCommands(Jim_Interp *interp, Jim_Obj *objPtr,
 JIM_EXPORT int Jim_ScriptIsComplete(Jim_Interp *interp,
         Jim_Obj *scriptObj, char *stateCharPtr);
 
+/* these used to be macros, but it's annoying to import
+   stdatomic.h every time you want to call one of these */
+void Jim_IncrRefCount(Jim_Obj *objPtr);
+void Jim_DecrRefCount(Jim_Obj *objPtr);
+int Jim_IsShared(Jim_Obj *objPtr);
+int Jim_SameInterp(Jim_Interp *interp, Jim_Obj *objPtr);
+
 /**
  * Find a matching name in the array of the given length.
  *
@@ -1014,10 +935,6 @@ JIM_EXPORT int Jim_AioFilehandle(Jim_Interp *interp, Jim_Obj *command);
 /* type inspection - avoid where possible */
 JIM_EXPORT int Jim_IsDict(Jim_Obj *objPtr);
 JIM_EXPORT int Jim_IsList(Jim_Obj *objPtr);
-
-#ifdef __cplusplus
-}
-#endif
 
 #endif /* __JIM__H */
 

@@ -4,7 +4,7 @@
 #ifndef JIM_SUBCMD_H
 #define JIM_SUBCMD_H
 
-#include <jim.h>
+#include "jim-private.h"
 
 #ifdef __cplusplus
 extern "C" {

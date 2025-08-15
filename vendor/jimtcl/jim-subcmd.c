@@ -8,7 +8,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include <jim-subcmd.h>
+#include "jim-subcmd.h"
 
 /**
  * Implements the common 'commands' subcommand

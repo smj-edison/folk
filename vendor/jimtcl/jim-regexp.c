@@ -58,7 +58,7 @@
     #define jim_regerror regerror
     #define jim_regfree regfree
 #endif
-#include "jim.h"
+#include "jim-private.h"
 #include "utf8.h"
 
 static void FreeRegexpInternalRep(Jim_Obj *objPtr)

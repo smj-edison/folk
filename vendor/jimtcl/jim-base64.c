@@ -42,8 +42,8 @@
 #include <stdio.h>
 #include <string.h>
 
-#include <jim.h>
-#include <jimautoconf.h>
+#include "jim-private.h"
+#include "jimautoconf.h"
 
 static const char B64Digits[65] = {
     'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H',

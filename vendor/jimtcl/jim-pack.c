@@ -1,5 +1,6 @@
 #include <string.h>
-#include <jim.h>
+
+#include "jim-private.h"
 
 /* Provides the [pack] and [unpack] commands to pack and unpack
  * a binary string to/from arbitrary width integers and strings.

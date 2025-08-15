@@ -11,8 +11,8 @@
 #include <sys/stat.h>
 
 #include "jimautoconf.h"
-#include <jim.h>
-#include <jim-win32compat.h>
+#include "jim-private.h"
+#include "jim-win32compat.h"
 
 /**
  * Set an error result based on errno and the given message.

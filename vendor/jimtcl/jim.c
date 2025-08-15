@@ -56,7 +56,7 @@
 #include <time.h>
 #include <setjmp.h>
 
-#include "jim.h"
+#include "jim-private.h"
 #include "jimautoconf.h"
 #include "jim-subcmd.h"
 #include "utf8.h"
@@ -2449,6 +2449,27 @@ static void JimSetStringBytes(Jim_Obj *objPtr, const char *str)
     objPtr->length = strlen(str);
 }
 
+/* these used to be macros, but it's annoying to import
+   stdatomic.h every time you want to call one of these */
+inline void Jim_IncrRefCount(Jim_Obj *objPtr) {
+    atomic_fetch_add_explicit(&(objPtr->refCount), 1, memory_order_relaxed);
+}
+
+inline void Jim_DecrRefCount(Jim_Obj *objPtr) {
+    int res = atomic_fetch_sub_explicit(&(objPtr->refCount), 1, memory_order_release);
+
+    if (res == 0) {
+        Jim_FreeObj(objPtr);
+    }
+}
+
+inline int Jim_IsShared(Jim_Obj *objPtr) {
+    return atomic_load_explicit(&(objPtr->refCount), memory_order_relaxed) > 1;
+}
+
+inline int Jim_SameInterp(Jim_Interp *interp, Jim_Obj *objPtr) {
+    return interp->interpId == objPtr->interpId;
+}
 
 static void FreeDictSubstInternalRep(Jim_Obj *objPtr);
 static void DupDictSubstInternalRep(Jim_Interp *interp, Jim_Obj *srcPtr, Jim_Obj *dupPtr);
@@ -3702,10 +3723,10 @@ static void ScriptObjAddTokens(Jim_Interp *interp, struct ScriptObj *script,
     JimPanic((script->len >= count, "allocated script array is too short"));
 
 #ifdef DEBUG_SHOW_SCRIPT
-    printf("==== Script (%s) ====\n", Jim_String(script->fileNameObj));
+    printf("==== Script (%s) ====\n", Jim_String(interp, script->fileNameObj));
     for (i = 0; i < script->len; i++) {
         const ScriptToken *t = &script->token[i];
-        printf("[%2d] %s %s\n", i, jim_tt_name(t->type), Jim_String(t->objPtr));
+        printf("[%2d] %s %s\n", i, jim_tt_name(t->type), Jim_String(interp,t->objPtr));
     }
 #endif
 
@@ -4007,12 +4028,12 @@ static void JimDecrCmdRefCount(Jim_Interp *interp, Jim_Cmd *cmdPtr)
  */
 static void JimIncrVarRef(Jim_VarVal *vv)
 {
-    atomic_fetch_add_explicit(&(vv->refCount), 1, memory_order_relaxed);
+    vv->refCount++;
 }
 
 static void JimDecrVarRef(Jim_VarVal *vv)
 {
-    int newRefCount = atomic_fetch_sub_explicit(&(vv->refCount), 1, memory_order_release);
+    int newRefCount = --vv->refCount;
     if (newRefCount == 0) {
         if (vv->objPtr) {
             Jim_DecrRefCount(vv->objPtr);
@@ -9690,7 +9711,7 @@ static int SetExprFromAny(Jim_Interp *interp, struct Jim_Obj *objPtr)
 #ifdef DEBUG_SHOW_EXPR_TOKENS
     {
         int i;
-        printf("==== Expr Tokens (%s) ====\n", Jim_String(fileNameObj));
+        printf("==== Expr Tokens (%s) ====\n", Jim_String(interp, fileNameObj));
         for (i = 0; i < tokenlist.count; i++) {
             printf("[%2d]@%d %s '%.*s'\n", i, tokenlist.list[i].line, jim_tt_name(tokenlist.list[i].type),
                 tokenlist.list[i].len, tokenlist.list[i].token);
@@ -10755,7 +10776,7 @@ static void JimPushEvalFrame(Jim_Interp *interp, Jim_EvalFrame *frame, Jim_Obj *
     interp->evalFrame = frame;
 #if 0
     if (frame->scriptObj) {
-        printf("script: %.*s\n", 20, Jim_String(frame->scriptObj));
+        printf("script: %.*s\n", 20, Jim_String(interp, frame->scriptObj));
     }
 #endif
 }
@@ -10779,7 +10800,7 @@ static int JimInvokeCommand(Jim_Interp *interp, int objc, Jim_Obj *const *objv)
     printf("invoke");
     int j;
     for (j = 0; j < objc; j++) {
-        printf(" '%s'", Jim_String(objv[j]));
+        printf(" '%s'", Jim_String(interp, objv[j]));
     }
     printf("\n");
 #endif
@@ -11824,7 +11845,7 @@ static int SetSubstFromAny(Jim_Interp *interp, struct Jim_Obj *objPtr, int flags
         printf("==== Subst ====\n");
         for (i = 0; i < script->len; i++) {
             printf("[%2d] %s '%s'\n", i, jim_tt_name(script->token[i].type),
-                Jim_String(script->token[i].objPtr));
+                Jim_String(interp, script->token[i].objPtr));
         }
     }
 #endif

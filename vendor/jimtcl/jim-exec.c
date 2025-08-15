@@ -61,7 +61,7 @@ static int Jim_ExecCmd(Jim_Interp *interp, int argc, Jim_Obj *const *argv)
         }
         Jim_AppendString(interp, cmdlineObj, "\"", 1);
     }
-    rc = system(Jim_String(cmdlineObj));
+    rc = system(Jim_String(interp, cmdlineObj));
 
     Jim_FreeNewObj(interp, cmdlineObj);
 
@@ -1453,7 +1453,7 @@ JimStartWinProcess(Jim_Interp *interp, char **argv, char **env, int inputId, int
         winenv = env[0];
     }
 
-    if (!CreateProcess(NULL, (char *)Jim_String(cmdLineObj), NULL, NULL, TRUE,
+    if (!CreateProcess(NULL, (char *)Jim_String(interp, cmdLineObj), NULL, NULL, TRUE,
             0, winenv, NULL, &startInfo, &procInfo)) {
         goto end;
     }
