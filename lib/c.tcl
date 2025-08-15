@@ -99,6 +99,7 @@ class C {
         }
     }
     code {}
+    fileType "c"
 
     vars {}
     procs {}
@@ -290,6 +291,10 @@ C method code {newcode} {
     }
     lappend code $newcode :noextend
     list
+}
+
+C method fileType {newFileType} {
+    set fileType $newFileType
 }
 
 C method define {newvars} {
@@ -578,7 +583,7 @@ C method cflags {args} { lappend cflags {*}$args }
 C method endcflags {args} { lappend endcflags {*}$args }
 
 C method compile {{cid {}}} {
-    set cfile [file tempfile /tmp/cfileXXXXXX].c
+    set cfile [file tempfile /tmp/cfileXXXXXX].$fileType
 
     # A universally unique id that can be used as a global proc name
     # in every thread.
@@ -590,12 +595,12 @@ C method compile {{cid {}}} {
         #include <string.h>
 
         #ifdef __cplusplus
-        \}
         #include <atomic>
-        static std::atomic<const char*> __cInfo = NULL;
-        extern "C" \{
+        static std::atomic<const char*> __cInfo(nullptr);
+        #define EXPORT extern "C"
         #else
         static const char* _Atomic __cInfo = NULL;
+        #define EXPORT
         #endif
 
         static int __setCInfo_Cmd(Jim_Interp* interp, int objc, Jim_Obj* const objv\[\]) {
@@ -616,7 +621,7 @@ C method compile {{cid {}}} {
             return JIM_OK;
         }
 
-        int Jim_${cid}Init(Jim_Interp* intp) {
+        EXPORT int Jim_${cid}Init(Jim_Interp* intp) {
             interp = intp;
 
             [join [lmap srcid $extends {
@@ -670,17 +675,13 @@ extern "C" \{
 #endif
 }]
     set sourcecode [join [list \
-                              $externC \
                               $prelude \
-                              $unexternC \
                               \
                               {*}[lmap {snippet extend} $code {set snippet}] \
                               \
-                              $externC \
                               {*}[dict values $objtypes] \
                               {*}[lmap p [dict values $procs] {dict get $p code}] \
                               $init \
-                              $unexternC \
                              ] "\n"]
 
     # puts "=====================\n$sourcecode\n====================="
@@ -796,6 +797,7 @@ C method extend {args} {
 
 proc ::C++ {} {
     set cpp [C]
+    $cpp fileType "cpp"
     $cpp eval [list set compiler c++]
     $cpp cflags -Wno-write-strings
     return $cpp
