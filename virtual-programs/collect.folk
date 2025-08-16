@@ -57,7 +57,7 @@ $cc proc Recollect! {Jim_Obj* patternObj} void {
         if (claimizedPattern != NULL) {
             Jim_Obj* claimizedMatchesObj = QuerySimple(claimizedPattern);
             Jim_ListAppendList(interp, matchesObj, claimizedMatchesObj);
-            Jim_DecrRefCount(interp, claimizedMatchesObj);
+            Jim_DecrRefCount(claimizedMatchesObj);
             free(claimizedPattern);
         }
         clauseFree(pattern);
@@ -74,14 +74,14 @@ $cc proc Recollect! {Jim_Obj* patternObj} void {
         collectedClause->terms[7] = strdup("are");
         collectedClause->terms[8] = strdup(Jim_String(interp, matchesObj));
 
-        Jim_DecrRefCount(interp, matchesObj);
+        Jim_DecrRefCount(matchesObj);
 
         HoldStatementGlobally(makeCollectKey(patternObj), version++,
                               collectedClause, 0, NULL, 0);
     }
 
     clauseFree(collectorPattern);
-    Jim_DecrRefCount(interp, collectorsObj);
+    Jim_DecrRefCount(collectorsObj);
 }
 set collectLib [$cc compile]
 
