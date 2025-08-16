@@ -20,8 +20,8 @@
 extern ThreadControlBlock threads[];
 extern Db* db;
 extern void trace(const char* format, ...);
-extern void HoldStatementGlobally(const char *key, double version,
-                                  Clause *clause, long keepMs, const char *destructorCode,
+extern void HoldStatementGlobally(const char *key, double version, Jim_Obj *jimClause,
+                                  long keepMs, const char *destructorCode,
                                   const char *sourceFileName, int sourceLineNumber);
 extern void workerReactivateOrSpawn();
 
@@ -153,17 +153,22 @@ void sysmon() {
     // Fifth: update the clock time statement in the database.
     // sysmon.c claims the clock time is <TIME>
     int64_t timeNs = timestamp_get(CLOCK_REALTIME);
-    Clause* clockTimeClause = malloc(SIZEOF_CLAUSE(7));
-    clockTimeClause->nTerms = 7;
-    clockTimeClause->terms[0] = strdup("sysmon.c");
-    clockTimeClause->terms[1] = strdup("claims");
-    clockTimeClause->terms[2] = strdup("the");
-    clockTimeClause->terms[3] = strdup("clock");
-    clockTimeClause->terms[4] = strdup("time");
-    clockTimeClause->terms[5] = strdup("is");
-    clockTimeClause->terms[6] = malloc(100);
-    snprintf(clockTimeClause->terms[6], 100, "%f",
+
+    char *timeStr = calloc(100, 1);
+    snprintf(timeStr, 100, "%f",
              (double)timeNs / 1000000000.0);
+
+    Jim_Obj* clockTimeTerms[] = {
+        Jim_NewStringObjNoInterp("sysmon.c", -1),
+        Jim_NewStringObjNoInterp("claims", -1),
+        Jim_NewStringObjNoInterp("the", -1),
+        Jim_NewStringObjNoInterp("clock", -1),
+        Jim_NewStringObjNoInterp("time", -1),
+        Jim_NewStringObjNoInterp("is", -1),
+        Jim_NewStringObjNoInterp(timeStr, -1),
+    };
+    Jim_Obj* clockTimeClause = Jim_NewListObjNoInterp(
+        clockTimeTerms, sizeof(clockTimeTerms)/sizeof(clockTimeTerms[0]));
 
     HoldStatementGlobally("clock-time", currentTick,
                           clockTimeClause, 5, NULL,
