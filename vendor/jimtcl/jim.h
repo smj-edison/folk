@@ -65,6 +65,8 @@
 #ifndef __JIM__H
 #define __JIM__H
 
+#define JIM_MAINTAINER
+
 #ifdef __cplusplus
 #include <atomic>
 

@@ -2329,7 +2329,7 @@ Jim_Obj *Jim_DuplicateObj(Jim_Interp *interp, Jim_Obj *objPtr, int flags)
     }
 
     if ((flags & JIM_FORCE_STRING) != 0) {
-        SetStringFromAnyUnshared(interp, objPtr);
+        SetStringFromAnyUnshared(interp, dupPtr);
     }
     
     return dupPtr;
@@ -2368,7 +2368,8 @@ Jim_Obj *DupIfWrongInterp(Jim_Interp *interp, Jim_Obj *objPtr, int flags) {
 
         if ((flags & JIM_TEMP_LIST) != 0) {
             /* only increment refCount if it's on the temp list */
-            Jim_IncrRefCount(objPtr);
+            JimPanic((objPtr->refCount > 1, "Item on temp list is still live"));
+            objPtr->refCount = 1;
         }
     }
 
@@ -5709,7 +5710,7 @@ void Jim_RewindTempListTo(Jim_Interp *interp, size_t to)
     for (size_t i = to; i < tempList->length; i++) {
         /* refCount should be exactly 1, e.g. owned by this list
          * (don't use Jim's DecrRefCount as the temp list can't have its
-          * interior freed with the global allocator) */
+         * elements freed with the global allocator) */
         int refCount = atomic_load_explicit(&(tempList->objects[i].refCount), memory_order_relaxed);
         JimPanic((refCount != 1, "tempList object with bad refCount %d (should be 1)", refCount));
 
@@ -11630,6 +11631,9 @@ static int JimCallProcedure(Jim_Interp *interp, Jim_Cmd *cmd, int argc, Jim_Obj 
     i = 1;
     for (d = 0; d < cmd->u.proc.argListLen; d++) {
         Jim_Obj *nameObjPtr = cmd->u.proc.arglist[d].nameObjPtr;
+        nameObjPtr = DupIfWrongInterp(interp, nameObjPtr, JIM_LIVE_LIST);
+        Jim_IncrRefCount(nameObjPtr);
+
         if (d == cmd->u.proc.argsPos) {
             /* assign $args */
             Jim_Obj *listObjPtr;
@@ -11645,10 +11649,13 @@ static int JimCallProcedure(Jim_Interp *interp, Jim_Cmd *cmd, int argc, Jim_Obj 
             }
             retcode = Jim_SetVariable(interp, nameObjPtr, listObjPtr);
             if (retcode != JIM_OK) {
+                Jim_DecrRefCount(nameObjPtr);
                 goto badargset;
             }
 
             i += argsLen;
+
+            Jim_DecrRefCount(nameObjPtr);
             continue;
         }
 
@@ -11661,8 +11668,11 @@ static int JimCallProcedure(Jim_Interp *interp, Jim_Cmd *cmd, int argc, Jim_Obj 
             retcode = Jim_SetVariable(interp, nameObjPtr, cmd->u.proc.arglist[d].defaultObjPtr);
         }
         if (retcode != JIM_OK) {
+            Jim_DecrRefCount(nameObjPtr);
             goto badargset;
         }
+
+        Jim_DecrRefCount(nameObjPtr);
     }
 
     if (interp->traceCmdObj == NULL ||
@@ -15362,10 +15372,14 @@ static int JimDictWith(Jim_Interp *interp, Jim_Obj *dictVarName, Jim_Obj *const 
         return JIM_ERR;
     }
     for (i = 0; i < len; i += 2) {
-        Jim_Obj *varNameObjPtr = DupIfWrongInterp(interp, dictValues[i], JIM_TEMP_LIST);
+        Jim_Obj *varNameObjPtr = DupIfWrongInterp(interp, dictValues[i], JIM_LIVE_LIST);
+        Jim_IncrRefCount(varNameObjPtr);
+
         if (Jim_SetVariable(interp, varNameObjPtr, dictValues[i + 1]) == JIM_ERR) {
+            Jim_DecrRefCount(varNameObjPtr);
             return JIM_ERR;
         }
+        Jim_DecrRefCount(varNameObjPtr);
     }
 
     /* As an optimisation, if the script is empty, no need to evaluate it or update the dict */
