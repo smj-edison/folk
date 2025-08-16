@@ -5675,7 +5675,7 @@ void Jim_FreeInterp(Jim_Interp *i)
 
     Jim_FreeHashTable(&i->packages, (void *)&i);
     Jim_Free(i->prngState);
-    Jim_ClearTempList(i);
+    Jim_RewindTempList(i);
     Jim_Free(i->tempList);
     Jim_FreeHashTable(&i->assocData, (void *)i);
     if (i->traceCmdObj) {
@@ -5694,14 +5694,19 @@ void Jim_FreeInterp(Jim_Interp *i)
     Jim_Free(i);
 }
 
-// includes `after` in removal
-void Jim_ClearTempListAfter(Jim_Interp *interp, size_t after)
+size_t Jim_GetTempListLen(Jim_Interp *interp)
+{
+    return interp->tempList->length;
+}
+
+// includes `to` in removal
+void Jim_RewindTempListTo(Jim_Interp *interp, size_t to)
 {
     Jim_TempList *tempList = interp->tempList;
 
-    if (after >= tempList->length) return;
+    if (to >= tempList->length) return;
 
-    for (size_t i = after; i < tempList->length; i++) {
+    for (size_t i = to; i < tempList->length; i++) {
         /* refCount should be exactly 1, e.g. owned by this list
          * (don't use Jim's DecrRefCount as the temp list can't have its
           * interior freed with the global allocator) */
@@ -5712,12 +5717,12 @@ void Jim_ClearTempListAfter(Jim_Interp *interp, size_t after)
         Jim_InvalidateStringRep(&tempList->objects[i]);
     }
 
-    tempList->length = after;
+    tempList->length = to;
 }
 
-void Jim_ClearTempList(Jim_Interp *interp)
+void Jim_RewindTempList(Jim_Interp *interp)
 {
-    Jim_ClearTempListAfter(interp, 0);
+    Jim_RewindTempListTo(interp, 0);
 }
 
 /* Returns the call frame relative to the level represented by
@@ -10960,6 +10965,8 @@ int Jim_EvalObjVector(Jim_Interp *interp, int objc, Jim_Obj *const *objv)
     int i, retcode;
     Jim_EvalFrame frame;
 
+    size_t tempListLen = Jim_GetTempListLen(interp);
+
     /* Incr refcount of arguments. */
     for (i = 0; i < objc; i++)
         Jim_IncrRefCount(objv[i]);
@@ -10974,6 +10981,8 @@ int Jim_EvalObjVector(Jim_Interp *interp, int objc, Jim_Obj *const *objv)
     /* Decr refcount of arguments and return the retcode */
     for (i = 0; i < objc; i++)
         Jim_DecrRefCount(objv[i]);
+
+    Jim_RewindTempListTo(interp, tempListLen);
 
     return retcode;
 }
@@ -11209,7 +11218,7 @@ int Jim_EvalObj(Jim_Interp *interp, Jim_Obj *scriptObjPtr)
         "object from another interpreter when running Jim_EvalObj"));
 
     int i;
-    size_t tempListLen = interp->tempList->length;
+    size_t tempListLen = Jim_GetTempListLen(interp);
     ScriptObj *script;
     ScriptToken *token;
     int retcode = JIM_OK;
@@ -11447,7 +11456,7 @@ int Jim_EvalObj(Jim_Interp *interp, Jim_Obj *scriptObjPtr)
     Jim_DecrRefCount(scriptObjPtr);
 
 out:
-    Jim_ClearTempListAfter(interp, tempListLen);
+    Jim_RewindTempListTo(interp, tempListLen);
     return retcode;
 }
 

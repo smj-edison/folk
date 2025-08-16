@@ -549,7 +549,7 @@ typedef struct Jim_PrngState {
 } Jim_PrngState;
 
 /* simple bump allocator for temp objects */
-#define JIM_TEMP_LIST_SIZE (512 * 1024)
+#define JIM_TEMP_LIST_SIZE (32 * 1024)
 typedef struct Jim_TempList {
     size_t length;
     Jim_Obj objects[JIM_TEMP_LIST_SIZE];
@@ -815,7 +815,9 @@ JIM_EXPORT int Jim_GetFinalizer (Jim_Interp *interp, Jim_Obj *objPtr, Jim_Obj **
 /* interpreter */
 JIM_EXPORT Jim_Interp * Jim_CreateInterp (void);
 JIM_EXPORT void Jim_FreeInterp (Jim_Interp *i);
-JIM_EXPORT void Jim_ClearTempList(Jim_Interp *interp);
+JIM_EXPORT size_t Jim_GetTempListLen (Jim_Interp *interp);
+JIM_EXPORT void Jim_RewindTempList (Jim_Interp *interp);
+JIM_EXPORT void Jim_RewindTempListTo (Jim_Interp *interp, size_t after);
 JIM_EXPORT int Jim_GetExitCode (Jim_Interp *interp);
 JIM_EXPORT const char *Jim_ReturnCode(int code);
 JIM_EXPORT void Jim_SetResultFormatted(Jim_Interp *interp, const char *format, ...);
