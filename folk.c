@@ -602,23 +602,19 @@ void eval(const char* code) {
 void workerExit();
 
 static void runWhenBlock(StatementRef whenRef, Jim_Obj* whenPattern, StatementRef stmtRef) {
-    // we may create temporary values throughout the following code,
-    // so this just ensures we rewind it when we're done
-    size_t tempListLen = Jim_GetTempListLen(interp);
-
     // Dereference refs. if any fail, then skip this work item.
     // Exception: stmtRef can be a null ref if and only if whenPattern
     // is {}.
     Statement* when = NULL;
     Statement* stmt = NULL;
     when = statementAcquire(db, whenRef);
-    if (when == NULL) { goto cleanup; }
+    if (when == NULL) { return; }
 
     if (!statementRefIsNull(stmtRef)) {
         stmt = statementAcquire(db, stmtRef);
         if (stmt == NULL) {
             statementRelease(db, when);
-            goto cleanup;
+            return;
         }
     }
     // Note that we have acquired `when` and `stmt` at this point, and
@@ -671,7 +667,7 @@ static void runWhenBlock(StatementRef whenRef, Jim_Obj* whenPattern, StatementRe
         if (env->nBindings > 50) {
             fprintf(stderr, "runWhenBlock: Too many bindings in env: %d\n",
                     env->nBindings);
-            goto cleanup;
+            return;
         }
 
         Jim_Obj* objs[env->nBindings*2];
@@ -683,7 +679,7 @@ static void runWhenBlock(StatementRef whenRef, Jim_Obj* whenPattern, StatementRe
         Jim_Obj* boundEnvObj = Jim_NewDictObj(interp, objs, env->nBindings*2);
 
         Jim_ListAppendList(interp, newEnvStack, capturedEnvStack);
-        Jim_ListAppendList(interp, newEnvStack, boundEnvObj);
+        Jim_ListAppendElement(interp, newEnvStack, boundEnvObj);
 
         free(env);
     }
@@ -704,7 +700,7 @@ static void runWhenBlock(StatementRef whenRef, Jim_Obj* whenPattern, StatementRe
         if (stmt != NULL) {
             statementRelease(db, stmt);
         }
-        goto cleanup;
+        return;
     }
 
     // Rule: you should never be holding a lock while doing a Tcl
@@ -762,9 +758,6 @@ static void runWhenBlock(StatementRef whenRef, Jim_Obj* whenPattern, StatementRe
     matchCompleted(self->currentMatch);
     matchRelease(db, self->currentMatch);
     self->currentMatch = NULL;
-
-cleanup:
-    Jim_RewindTempListTo(interp, tempListLen);
 }
 // Copies the whenPattern Clause and all terms so it can be owned (and
 // freed) by the eventual handler of the block.
@@ -1127,6 +1120,10 @@ void workerLoop() {
             // run.
             workerExit();
         }
+
+        // no one is using the interp at this moment, so we can
+        // rewind the temp list
+        Jim_RewindTempList(interp);
 
         WorkQueueItem item = { .op = NONE };
         if (schedtick % 61 == 0) {
