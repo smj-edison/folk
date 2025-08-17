@@ -10,18 +10,18 @@ $cc cflags -I.
 $cc include <string.h>
 $cc include "trie.h"
 $cc code {
-    extern Clause* jimObjToClauseWithCaching(Jim_Interp* interp, Jim_Obj* obj);
     extern void HoldStatementGlobally(const char *key, double version,
-                                      Clause *clause, long keepMs,
-                                      const char *sourceFileName, int sourceLineNumber);
-    extern Jim_Obj* QuerySimple(Clause* pattern);
+                    Jim_Obj *jimClause, long keepMs, const char *destructorCode,
+                    const char *sourceFileName, int sourceLineNumber);
+    extern Jim_Obj* QuerySimple(Jim_Obj* pattern);
     extern Clause* claimizeClause(Clause* clause);
+    Clause* jimClauseToTrieClause(Jim_Interp* interp, Jim_Obj* obj);
 
-    char* makeCollectKey(Jim_Obj* patternObj) {
+    char* makeCollectKey(Jim_Interp* interp, Jim_Obj* patternObj) {
         const char COLLECT[] = "collect ";
         int collectLen = sizeof(COLLECT) - 1;
 
-        int keyLen = Jim_Length(patternObj);
+        int keyLen = Jim_Length(interp, patternObj);
         char *collectKey = malloc(collectLen + keyLen + 1);
         memcpy(collectKey, COLLECT, collectLen);
         memcpy(collectKey + collectLen, Jim_String(interp, patternObj), keyLen + 1);
@@ -32,56 +32,64 @@ $cc code {
 }
 
 $cc proc Recollect! {Jim_Obj* patternObj} void {
-    // First, query for collect patterns.
-    Clause* collectorPattern = malloc(SIZEOF_CLAUSE(7));
-    collectorPattern->nTerms = 7;
-    collectorPattern->terms[0] = strdup("/someone/");
-    collectorPattern->terms[1] = strdup("wishes");
-    collectorPattern->terms[2] = strdup("to");
-    collectorPattern->terms[3] = strdup("collect");
-    collectorPattern->terms[4] = strdup("matches");
-    collectorPattern->terms[5] = strdup("for");
-    collectorPattern->terms[6] = strdup(Jim_String(interp, patternObj));
+    Jim_IncrRefCount(patternObj);
 
-    Jim_Obj* collectorsObj = QuerySimple(collectorPattern);
+    // First, query for collect patterns.
+    Jim_Obj* collectorTerms[] = {
+        Jim_NewStringObjNoInterp("/someone/", -1),
+        Jim_NewStringObjNoInterp("wishes", -1),
+        Jim_NewStringObjNoInterp("to", -1),
+        Jim_NewStringObjNoInterp("collect", -1),
+        Jim_NewStringObjNoInterp("matches", -1),
+        Jim_NewStringObjNoInterp("for", -1),
+        patternObj
+    };
+    Jim_Obj* collectorClause = Jim_NewListObjNoInterp(
+        collectorTerms, sizeof(collectorTerms)/sizeof(collectorTerms[0])
+    );
+
+    Jim_Obj* collectorsObj = QuerySimple(collectorClause);
     if (Jim_ListLength(interp, collectorsObj) == 0) {
         Clause* emptyClause = malloc(SIZEOF_CLAUSE(0));
         emptyClause->nTerms = 0;
-        HoldStatementGlobally(makeCollectKey(patternObj), version++,
-                              emptyClause, 0, NULL, 0);
+        HoldStatementGlobally(makeCollectKey(interp, patternObj), version++,
+                              Jim_NewObjNoInterp(), 0, NULL, NULL, 0);
     } else {
-        Clause* pattern = jimObjToClauseWithCaching(interp, patternObj);
-        Jim_Obj* matchesObj = QuerySimple(pattern);
+        Jim_Obj* matchesObj = QuerySimple(patternObj);
 
-        Clause* claimizedPattern = claimizeClause(pattern);
+        Clause* pattern = jimClauseToTrieClause(patternObj);
+        Clause* claimizedPattern = claimizeClause(interp, pattern);
         if (claimizedPattern != NULL) {
             Jim_Obj* claimizedMatchesObj = QuerySimple(claimizedPattern);
             Jim_ListAppendList(interp, matchesObj, claimizedMatchesObj);
             Jim_DecrRefCount(claimizedMatchesObj);
-            free(claimizedPattern);
+            clauseFree(claimizedPattern);
         }
         clauseFree(pattern);
 
-        Clause* collectedClause = malloc(SIZEOF_CLAUSE(9));
-        collectedClause->nTerms = 9;
-        collectedClause->terms[0] = strdup("virtual-programs/collect.folk");
-        collectedClause->terms[1] = strdup("claims");
-        collectedClause->terms[2] = strdup("the");
-        collectedClause->terms[3] = strdup("collected");
-        collectedClause->terms[4] = strdup("matches");
-        collectedClause->terms[5] = strdup("for");
-        collectedClause->terms[6] = strdup(Jim_String(interp, patternObj));
-        collectedClause->terms[7] = strdup("are");
-        collectedClause->terms[8] = strdup(Jim_String(interp, matchesObj));
 
-        Jim_DecrRefCount(matchesObj);
+        Jim_Obj* collectedTerms[] = {
+            Jim_NewStringObjNoInterp("virtual-programs/collect.folk", -1),
+            Jim_NewStringObjNoInterp("claims", -1),
+            Jim_NewStringObjNoInterp("the", -1),
+            Jim_NewStringObjNoInterp("collected", -1),
+            Jim_NewStringObjNoInterp("matches", -1),
+            Jim_NewStringObjNoInterp("for", -1),
+            patternObj,
+            Jim_NewStringObjNoInterp("are", -1),
+            matchesObj,
+        };
+        Jim_Obj* collectedClause = Jim_NewListObjNoInterp(
+            collectedTerms, sizeof(collectedTerms)/sizeof(collectedTerms[0])
+        );
 
-        HoldStatementGlobally(makeCollectKey(patternObj), version++,
-                              collectedClause, 0, NULL, 0);
+        HoldStatementGlobally(makeCollectKey(interp, patternObj), version++,
+                              collectedClause, 0, NULL, NULL, 0);
+
+        Jim_FreeNewObj(matchesObj);
     }
 
-    clauseFree(collectorPattern);
-    Jim_DecrRefCount(collectorsObj);
+    Jim_FreeNewObj(collectorsObj);
 }
 set collectLib [$cc compile]
 

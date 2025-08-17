@@ -96,6 +96,9 @@ void cacheInsert(Cache* cache, Jim_Interp* interp,
 Jim_Obj* cacheGetOrInsert(Cache* cache, Jim_Interp* interp,
                           const char* term) {
     Jim_Obj* obj = Jim_NewStringObj(interp, term, -1);
+    // object is owned by the cache (this way it won't get
+    // freed during other operations that change refCount)
+    Jim_IncrRefCount(obj);
     return obj;
 
     /* Jim_HashEntry* ent = Jim_FindHashEntry(&cache->newTable, term); */

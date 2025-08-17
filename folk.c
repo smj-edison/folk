@@ -90,6 +90,11 @@ __thread Cache* cache = NULL;
 
 Db* db;
 
+// Appends a string to a list. List be non-shared
+static void jimAppendString(Jim_Interp* interp, Jim_Obj* listPtr, const char* str) {
+    Jim_ListAppendElement(interp, listPtr, Jim_NewStringObj(interp, str, -1));
+}
+
 static Clause* jimObjsToTrieClause(int objc, Jim_Obj *const *objv) {
     Clause* clause = malloc(SIZEOF_CLAUSE(objc));
     clause->nTerms = objc;
@@ -148,11 +153,12 @@ typedef struct Environment {
 // the returned Environment*.
 // "a" and "b" must have a list internal representation.
 Environment* clauseUnify(Jim_Interp* interp, Jim_Obj* a, Jim_Obj* b) {
-    assert(Jim_HasListInternalRep(a));
-    assert(Jim_HasListInternalRep(b));
+    a = DupIfSharedAndWrongRep(interp, a, Jim_ListType(), JIM_TEMP_LIST);
+    b = DupIfSharedAndWrongRep(interp, b, Jim_ListType(), JIM_TEMP_LIST);
 
-    size_t aLen = a->internalRep.listValue.len;
-    size_t bLen = b->internalRep.listValue.len;
+    // getting length will shimmer to list
+    size_t aLen = Jim_ListLength(interp, a);
+    size_t bLen = Jim_ListLength(interp, b);
 
     Jim_Obj** aTerms = a->internalRep.listValue.ele;
     Jim_Obj** bTerms = b->internalRep.listValue.ele;
@@ -549,6 +555,14 @@ static int __concludeFunc(Jim_Interp *interp, int argc, Jim_Obj *const *argv) {
     return JIM_OK;
 }
 
+void initSysmonInterp() {
+    interp = Jim_CreateInterp();
+}
+
+void rewindSysmonInterp() {
+    Jim_RewindTempList(interp);
+}
+
 static void interpBoot() {
     interp = Jim_CreateInterp();
     cache = cacheNew();
@@ -626,14 +640,11 @@ static void runWhenBlock(StatementRef whenRef, Jim_Obj* whenPattern, StatementRe
     Jim_Obj* whenClause = statementJimClause(when);
     Jim_Obj* stmtClause = stmt == NULL ? whenPattern : statementJimClause(stmt);
 
-    assert(Jim_HasListInternalRep(whenClause));
-    assert(Jim_HasListInternalRep(stmtClause));
+    assert(whenClause->typePtr == Jim_ListType());
     assert(Jim_ListLength(interp, whenClause) >= 5);
 
     Jim_Obj** whenClauseTerms = whenClause->internalRep.listValue.ele;
-    Jim_Obj** stmtClauseTerms = stmtClause->internalRep.listValue.ele;
     size_t whenClauseLen = whenClause->internalRep.listValue.len;
-    size_t stmtClauseLen = stmtClause->internalRep.listValue.len;
 
     // when the time is /t/ /body/ with environment /capturedEnvStack/
     const char* body = Jim_GetString(interp, whenClauseTerms[whenClauseLen - 4], NULL);
@@ -643,8 +654,8 @@ static void runWhenBlock(StatementRef whenRef, Jim_Obj* whenPattern, StatementRe
     // why use the cache here? That way we only parse the code once.
     Jim_Obj *bodyObj = cacheGetOrInsert(cache, interp, body);
 
+    Jim_IncrRefCount(stmtClause);
     Jim_IncrRefCount(capturedEnvStack);
-    Jim_IncrRefCount(bodyObj);
 
     // Set the source info for the bodyObj:
     const char *ptr;
@@ -658,6 +669,9 @@ static void runWhenBlock(StatementRef whenRef, Jim_Obj* whenPattern, StatementRe
                           statementSourceLineNumber(when));
     }
 
+    // have to incr here, else Jim_SetSourceInfo will panic due to refCount being 2
+    Jim_IncrRefCount(bodyObj);
+
     {
         // Figure out all the bound match variables by unifying when &
         // stmt:
@@ -667,6 +681,9 @@ static void runWhenBlock(StatementRef whenRef, Jim_Obj* whenPattern, StatementRe
         if (env->nBindings > 50) {
             fprintf(stderr, "runWhenBlock: Too many bindings in env: %d\n",
                     env->nBindings);
+            Jim_DecrRefCount(capturedEnvStack);
+            Jim_DecrRefCount(bodyObj);
+            Jim_DecrRefCount(stmtClause);
             return;
         }
 
@@ -693,13 +710,13 @@ static void runWhenBlock(StatementRef whenRef, Jim_Obj* whenPattern, StatementRe
     }
     if (!self->currentMatch) {
         // A parent is gone. Abort.
-        Jim_DecrRefCount(capturedEnvStack);
-        Jim_DecrRefCount(bodyObj);
-
         statementRelease(db, when);
         if (stmt != NULL) {
             statementRelease(db, stmt);
         }
+        Jim_DecrRefCount(capturedEnvStack);
+        Jim_DecrRefCount(bodyObj);
+        Jim_DecrRefCount(stmtClause);
         return;
     }
 
@@ -736,6 +753,7 @@ static void runWhenBlock(StatementRef whenRef, Jim_Obj* whenPattern, StatementRe
 
     Jim_DecrRefCount(capturedEnvStack);
     Jim_DecrRefCount(bodyObj);
+    Jim_DecrRefCount(stmtClause);
 
     statementRelease(db, when);
     if (stmt != NULL) { statementRelease(db, stmt); }
@@ -762,7 +780,6 @@ static void runWhenBlock(StatementRef whenRef, Jim_Obj* whenPattern, StatementRe
 // Copies the whenPattern Clause and all terms so it can be owned (and
 // freed) by the eventual handler of the block.
 static void pushRunWhenBlock(StatementRef when, Jim_Obj* whenPattern, StatementRef stmt) {
-    Jim_IncrRefCount(whenPattern);
     appropriateWorkQueuePush((WorkQueueItem) {
        .op = RUN,
        .run = { .when = when, .whenPattern = whenPattern, .stmt = stmt }
@@ -770,57 +787,81 @@ static void pushRunWhenBlock(StatementRef when, Jim_Obj* whenPattern, StatementR
 }
 
 // Prepends `/someone/ claims` to `clause`. Returns NULL if `clause`
-// shouldn't be claimized. Returns a new heap-allocated Clause* that
-// must be freed by the caller.
-Clause* claimizeClause(Clause* clause) {
-    if (clause->nTerms >= 2 &&
-        (strcmp(clause->terms[1], "claims") == 0 ||
-         strcmp(clause->terms[1], "wishes") == 0)) {
+// shouldn't be claimized. Returns new Jim_Obj with refCount = 0
+Jim_Obj* claimizeClause(Jim_Obj* jimClause) {
+    jimClause = Jim_DupIfShared(interp, jimClause, JIM_TEMP_LIST);
+    Jim_Obj* ret = Jim_NewListObj(interp, NULL, 0);
+
+    size_t nTerms = Jim_ListLength(interp, jimClause);
+
+    const char* firstTerm = Jim_String(interp, Jim_ListGetIndex(interp, jimClause, 1));
+    if (nTerms >= 2 &&
+        (strcmp(firstTerm, "claims") == 0 ||
+         strcmp(firstTerm, "wishes") == 0)) {
         return NULL;
     }
 
     // the time is /t/ -> /someone/ claims the time is /t/
-    Clause* ret = malloc(SIZEOF_CLAUSE(2 + clause->nTerms));
-    ret->nTerms = 2 + clause->nTerms;
-    ret->terms[0] = "/someone/"; ret->terms[1] = "claims";
-    for (int i = 0; i < clause->nTerms; i++) {
-        ret->terms[2 + i] = clause->terms[i];
+    jimAppendString(interp, ret, "/someone/");
+    jimAppendString(interp, ret, "claims");
+
+    for (int i = 0; i < nTerms; i++) {
+        Jim_ListAppendElement(interp, ret, Jim_ListGetIndex(interp, jimClause, i));
     }
+
     return ret;
 }
-static Clause* unclaimizeClause(Clause* clause) {
+
+// Returns new Jim_Obj with refCount = 0
+static Jim_Obj* unclaimizeClause(Jim_Obj* jimClause) {
+    jimClause = Jim_DupIfShared(interp, jimClause, JIM_TEMP_LIST);
+    Jim_Obj* ret = Jim_NewListObj(interp, NULL, 0);
+
+    size_t nTerms = Jim_ListLength(interp, jimClause);
+
     // Omar claims the time is 3
     //   -> the time is 3
-    Clause* ret = malloc(SIZEOF_CLAUSE(clause->nTerms - 2));
-    ret->nTerms = 0;
-    for (int i = 2; i < clause->nTerms; i++) {
-        ret->terms[ret->nTerms++] = clause->terms[i];
+    for (size_t i = 2; i < nTerms; i++) {
+        Jim_ListAppendElement(interp, ret, Jim_ListGetIndex(interp, jimClause, i));
     }
+
     return ret;
 }
-static Clause* whenizeClause(Clause* clause) {
+
+// Returns new Jim_Obj with refCount = 0
+static Jim_Obj* whenizeClause(Jim_Obj* jimClause) {
     // the time is /t/
     //   -> when the time is /t/ /__lambda/ with environment /__env/
-    Clause* ret = malloc(SIZEOF_CLAUSE(clause->nTerms + 5));
-    ret->nTerms = clause->nTerms + 5;
-    ret->terms[0] = "when";
-    for (int i = 0; i < clause->nTerms; i++) {
-        ret->terms[1 + i] = clause->terms[i];
+    jimClause = Jim_DupIfShared(interp, jimClause, JIM_TEMP_LIST);
+    Jim_Obj* ret = Jim_NewListObj(interp, NULL, 0);
+
+    size_t nTerms = Jim_ListLength(interp, jimClause);
+
+    jimAppendString(interp, ret, "when");
+    for (int i = 0; i < nTerms; i++) {
+        Jim_ListAppendElement(interp, ret, Jim_ListGetIndex(interp, jimClause, i));
     }
-    ret->terms[1 + clause->nTerms] = "/__lambda/";
-    ret->terms[2 + clause->nTerms] = "with";
-    ret->terms[3 + clause->nTerms] = "environment";
-    ret->terms[4 + clause->nTerms] = "/__env/";
+    jimAppendString(interp, ret, "/__lambda/");
+    jimAppendString(interp, ret, "with");
+    jimAppendString(interp, ret, "environment");
+    jimAppendString(interp, ret, "/__env/");
+
     return ret;
 }
-static Clause* unwhenizeClause(Clause* whenClause) {
+
+// Returns new Jim_Obj with refCount = 0
+static Jim_Obj* unwhenizeClause(Jim_Obj* jimClause) {
     // when the time is /t/ /lambda/ with environment /env/
     //   -> the time is /t/
-    Clause* ret = malloc(SIZEOF_CLAUSE(whenClause->nTerms - 5));
-    ret->nTerms = 0;
-    for (int i = 1; i < whenClause->nTerms - 4; i++) {
-        ret->terms[ret->nTerms++] = whenClause->terms[i];
+    jimClause = Jim_DupIfShared(interp, jimClause, JIM_TEMP_LIST);
+    Jim_Obj* ret = Jim_NewListObj(interp, NULL, 0);
+
+    size_t nTerms = Jim_ListLength(interp, jimClause);
+
+    for (int i = 1; i < nTerms - 4; i++) {
+        Jim_ListAppendElement(interp, ret, Jim_ListGetIndex(interp, jimClause, i));
     }
+
     return ret;
 }
 
@@ -831,50 +872,48 @@ static void reactToNewStatement(StatementRef ref) {
     // This is just to ensure clause validity.
     Statement* stmt = statementAcquire(db, ref);
     if (stmt == NULL) { return; }
-    Clause* clause = statementTrieClause(stmt);
+    Jim_Obj* jimClause = statementJimClause(stmt);
 
-    if (strcmp(clause->terms[0], "when") == 0) {
+    Jim_Obj* firstTerm = Jim_ListGetIndex(interp, jimClause, 0);
+    if (firstTerm != NULL && strcmp(Jim_String(interp, firstTerm), "when") == 0) {
         // Find the query pattern of the when:
-        Clause* pattern = unwhenizeClause(clause);
-        if (pattern->nTerms == 0) {
+        Jim_Obj* pattern = unwhenizeClause(jimClause);
+        if (Jim_ListLength(interp, pattern) == 0) {
             // Empty pattern: When { ... }
             pushRunWhenBlock(
                 ref,
-                termsToJimObj(interp, pattern->nTerms, pattern->terms),
+                pattern,
                 STATEMENT_REF_NULL
             );
-            free(pattern);
-
         } else {
             // Scan the existing statement set for any
             // already-existing matching statements.
-            ResultSet* existingMatchingStatements = dbQuery(db, pattern);
+            Clause* triePattern = jimClauseToTrieClause(interp, pattern);
+            ResultSet* existingMatchingStatements = dbQuery(db, triePattern);
             for (int i = 0; i < existingMatchingStatements->nResults; i++) {
                 pushRunWhenBlock(
                     ref,
-                    termsToJimObj(interp, pattern->nTerms, pattern->terms),
+                    pattern,
                     existingMatchingStatements->results[i]
                 );
             }
             free(existingMatchingStatements);
+            clauseFree(triePattern);
 
-            Clause* claimizedPattern = claimizeClause(pattern);
+            Jim_Obj* claimizedPattern = claimizeClause(pattern);
             if (claimizedPattern) {
-                existingMatchingStatements = dbQuery(db, claimizedPattern);
+                Clause* claimizedTriePattern = jimClauseToTrieClause(interp, claimizedPattern);
+                existingMatchingStatements = dbQuery(db, claimizedTriePattern);
                 for (int i = 0; i < existingMatchingStatements->nResults; i++) {
                     pushRunWhenBlock(
                         ref,
-                        termsToJimObj(interp, claimizedPattern->nTerms, claimizedPattern->terms),
+                        claimizedPattern,
                         existingMatchingStatements->results[i]
                     );
                 }
                 free(existingMatchingStatements);
+                clauseFree(claimizedTriePattern);
             }
-
-            // pattern and claimizedPattern don't allocate any new terms,
-            // so just free the clause structs themselves.
-            free(pattern);
-            free(claimizedPattern);
         }
     }
 
@@ -901,9 +940,9 @@ static void reactToNewStatement(StatementRef ref) {
     {
         // the time is 3
         //   -> when the time is 3 /__lambda/ with environment /__env/
-        Clause* whenizedClause = whenizeClause(clause);
-
-        ResultSet* existingReactingWhens = dbQuery(db, whenizedClause);
+        Jim_Obj* whenizedJimClause = whenizeClause(jimClause);
+        Clause* whenizedTrieClause = jimClauseToTrieClause(interp, whenizedJimClause);
+        ResultSet* existingReactingWhens = dbQuery(db, whenizedTrieClause);
         /* trace("Adding stmt: existing reacting whens (%d)", */
         /*       existingReactingWhens->nResults); */
         for (int i = 0; i < existingReactingWhens->nResults; i++) {
@@ -912,33 +951,37 @@ static void reactToNewStatement(StatementRef ref) {
             //   -> the time is /t/
             Statement* when = statementAcquire(db, whenRef);
             if (when) {
-                Clause* whenPattern = unwhenizeClause(statementTrieClause(when));
+                Jim_Obj* whenPattern = unwhenizeClause(statementJimClause(when));
                 statementRelease(db, when);
 
                 pushRunWhenBlock(
                     whenRef,
-                    termsToJimObj(interp, whenPattern->nTerms, whenPattern->terms),
+                    whenPattern,
                     ref
                 );
-
-                free(whenPattern); // doesn't own any terms.
             }
         }
         free(existingReactingWhens);
 
-        free(whenizedClause); // doesn't own any terms.
+        Jim_FreeNewObj(whenizedJimClause);
+        clauseFree(whenizedTrieClause);
     }
-    if (clause->nTerms >= 2 && strcmp(clause->terms[1], "claims") == 0) {
+
+    Jim_Obj* secondTerm = Jim_ListGetIndex(interp, jimClause, 1);
+    if (secondTerm != NULL && strcmp(Jim_String(interp, secondTerm), "claims") == 0) {
         // Cut off `/x/ claims` from start of clause:
         //
         // /x/ claims the time is 3
         //   -> when the time is 3 /__lambda/ with environment /__env/
-        Clause* unclaimizedClause = unclaimizeClause(clause);
-        Clause* whenizedUnclaimizedClause = whenizeClause(unclaimizedClause);
+        Jim_Obj* unclaimizedClause = unclaimizeClause(jimClause);
+        Jim_Obj* whenizedUnclaimizedClause = whenizeClause(unclaimizedClause);
+        Clause* whenizedUnclaimizedTrieClause =
+            jimClauseToTrieClause(interp, whenizedUnclaimizedClause);
 
-        ResultSet* existingReactingWhens = dbQuery(db, whenizedUnclaimizedClause);
-        free(unclaimizedClause);
-        free(whenizedUnclaimizedClause);
+        ResultSet* existingReactingWhens = dbQuery(db, whenizedUnclaimizedTrieClause);
+        Jim_FreeNewObj(unclaimizedClause);
+        Jim_FreeNewObj(whenizedUnclaimizedClause);
+        clauseFree(whenizedUnclaimizedTrieClause);
 
         for (int i = 0; i < existingReactingWhens->nResults; i++) {
             StatementRef whenRef = existingReactingWhens->results[i];
@@ -946,19 +989,18 @@ static void reactToNewStatement(StatementRef ref) {
             //   -> /someone/ claims the time is /t/
             Statement* when = statementAcquire(db, whenRef);
             if (when) {
-                Clause* unwhenizedWhenPattern = unwhenizeClause(statementTrieClause(when));
-                Clause* claimizedUnwhenizedWhenPattern = claimizeClause(unwhenizedWhenPattern);
+                Jim_Obj* unwhenizedWhenPattern = unwhenizeClause(statementJimClause(when));
+                Jim_Obj* claimizedUnwhenizedWhenPattern = claimizeClause(unwhenizedWhenPattern);
                 statementRelease(db, when);
 
                 pushRunWhenBlock(
                     whenRef,
-                    termsToJimObj(interp,
-                                  claimizedUnwhenizedWhenPattern->nTerms,
-                                  claimizedUnwhenizedWhenPattern->terms),
+                    // takes ownership
+                    claimizedUnwhenizedWhenPattern,
                     ref
                 );
-                free(unwhenizedWhenPattern);
-                free(claimizedUnwhenizedWhenPattern);
+
+                Jim_FreeNewObj(unwhenizedWhenPattern);
             }
         }
         free(existingReactingWhens);
@@ -1015,7 +1057,6 @@ void workerRun(WorkQueueItem item) {
         /* printf("  when: %d:%d; stmt: %d:%d\n", item.run.when.idx, item.run.when.gen, */
         /*        item.run.stmt.idx, item.run.stmt.gen); */
         runWhenBlock(item.run.when, item.run.whenPattern, item.run.stmt);
-        Jim_DecrRefCount(item.run.whenPattern);
 
     } else if (item.op == EVAL) {
         // Used for destructors.

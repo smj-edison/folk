@@ -911,7 +911,7 @@ StatementRef dbInsertOrReuseStatement(Db* db, Jim_Interp* interp,
 
     // everything following this is going to be _incredibly_ slow if
     // it's not a list type (just a sanity check)
-    assert(Jim_HasListInternalRep(jimClause));
+    assert(jimClause->typePtr == Jim_ListType());
 
     Match* parentMatch = NULL;
     if (!matchRefIsNull(parentMatchRef)) {
