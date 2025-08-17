@@ -6360,9 +6360,9 @@ static const Jim_ObjType listObjType = {
     JIM_TYPE_NONE,
 };
 
-int Jim_HasListInternalRep(Jim_Obj *objPtr)
+Jim_ObjType *Jim_ListType()
 {
-    return objPtr->typePtr == &listObjType;
+    return &listObjType;
 }
 
 void FreeListInternalRep(Jim_Obj *objPtr)

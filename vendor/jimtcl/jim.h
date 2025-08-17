@@ -766,6 +766,8 @@ JIM_EXPORT void Jim_FreeObj (Jim_Obj *objPtr);
 JIM_EXPORT void Jim_InvalidateStringRep (Jim_Obj *objPtr);
 JIM_EXPORT Jim_Obj * Jim_DuplicateObj (Jim_Interp *interp,
         Jim_Obj *objPtr, int flags);
+JIM_EXPORT Jim_Obj * DupIfSharedAndWrongRep(Jim_Interp *interp, Jim_Obj *objPtr,
+        const Jim_ObjType *typePtr, int flags);
 JIM_EXPORT Jim_Obj * DupIfWrongInterp(Jim_Interp *interp, Jim_Obj *objPtr, int flags);
 JIM_EXPORT Jim_Obj * Jim_DupIfShared(Jim_Interp *interp, Jim_Obj *objPtr, int flags);
 JIM_EXPORT const char * Jim_GetString(Jim_Interp *interp, Jim_Obj *objPtr,
@@ -872,7 +874,7 @@ JIM_EXPORT int Jim_GetIndex (Jim_Interp *interp, Jim_Obj *objPtr,
         int *indexPtr);
 
 /* list object */
-JIM_EXPORT int Jim_HasListInternalRep (Jim_Obj *objPtr);
+JIM_EXPORT Jim_ObjType * Jim_ListType ();
 JIM_EXPORT Jim_Obj * Jim_NewListObj (Jim_Interp *interp,
         Jim_Obj *const *elements, int len);
 JIM_EXPORT Jim_Obj * Jim_NewListObjNoInterp (Jim_Obj *const *elements, int len);
