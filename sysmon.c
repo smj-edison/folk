@@ -24,6 +24,8 @@ extern void HoldStatementGlobally(const char *key, double version, Jim_Obj *jimC
                                   long keepMs, const char *destructorCode,
                                   const char *sourceFileName, int sourceLineNumber);
 extern void workerReactivateOrSpawn();
+extern void initSysmonInterp();
+extern void rewindSysmonInterp();
 
 // How many ms are in each tick? You probably want this to be less
 // than half of 16ms (1 frame).
@@ -176,6 +178,8 @@ void sysmon() {
 }
 
 void *sysmonMain(void *ptr) {
+    initSysmonInterp();
+
 #ifdef TRACY_ENABLE
     TracyCSetThreadName("sysmon");
 #endif
@@ -190,6 +194,7 @@ void *sysmonMain(void *ptr) {
 
         tick++;
         sysmon();
+        rewindSysmonInterp();
     }
     return NULL;
 }
