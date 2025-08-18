@@ -394,7 +394,6 @@ StatementRef statementRef(Db* db, Statement* stmt) {
 // 
 // jimClause and trieClause should be identical (with jimClause considered
 // authoritative)
-Clause* jimClauseToTrieClause(Jim_Interp* interp, Jim_Obj* obj);
 static StatementRef statementNew(Db* db, Jim_Obj* jimClause, 
                                  Clause* derivedTrieClause,
                                  long keepMs, const char* sourceFileName,
@@ -912,17 +911,13 @@ StatementRef dbInsertOrReuseStatement(Db* db, Jim_Interp* interp,
     // everything following this is going to be _incredibly_ slow if
     // it's not a list type
     if (jimClause->typePtr != Jim_ListType()) {
-        Jim_Obj* jimClauseAsList = Jim_DupIfShared(interp, jimClause, JIM_LIVE_LIST);
-        // guaranteed to shimmer as it's not shared
-        Jim_ListLength(interp, jimClauseAsList);
-
-        if (jimClauseAsList != jimClause) {
-            // potentially delete if refCount == 0
-            Jim_IncrRefCount(jimClause);
-            Jim_DecrRefCount(jimClause);
+        if (Jim_IsShared(jimClause)) {
+            Jim_Obj* jimClauseAsList = Jim_DuplicateObj(interp, jimClause, JIM_LIVE_LIST);
+            jimClause = jimClauseAsList;
         }
 
-        jimClause = jimClauseAsList;
+        // guaranteed to shimmer as it's not shared
+        Jim_ListLength(interp, jimClause);
     }
 
     Match* parentMatch = NULL;
@@ -1141,8 +1136,7 @@ void dbRetractStatements(Db* db, Clause* pattern) {
     }
 }
 
-// Will increase jimClause's refCount by 1, and will
-// decrement refCount by 1 when it's done with jimClause.
+// takes ownership of jimClause
 StatementRef dbHoldStatement(Db* db, Jim_Interp* interp,
                              const char* key, double version,
                              Jim_Obj* jimClause, long keepMs,
@@ -1152,7 +1146,6 @@ StatementRef dbHoldStatement(Db* db, Jim_Interp* interp,
     if (outOldStatement) { *outOldStatement = STATEMENT_REF_NULL; }
 
     mutexLock(&db->holdsMutex);
-    Jim_IncrRefCount(jimClause);
 
     Hold* hold = NULL;
     for (int i = 0; i < sizeof(db->holds)/sizeof(db->holds[0]); i++) {
@@ -1191,7 +1184,7 @@ StatementRef dbHoldStatement(Db* db, Jim_Interp* interp,
         if (oldStmtPtr && Jim_StringEqObj(interp, jimClause, statementJimClause(oldStmtPtr))) {
             statementRelease(db, oldStmtPtr);
             mutexUnlock(&db->holdsMutex);
-            Jim_DecrRefCount(jimClause);
+            if (jimClause->refCount == 0) Jim_FreeNewObj(jimClause);
             return STATEMENT_REF_NULL;
         }
 
@@ -1261,14 +1254,14 @@ StatementRef dbHoldStatement(Db* db, Jim_Interp* interp,
         if (outOldStatement) { *outOldStatement = oldStmt; }
 
         mutexUnlock(&db->holdsMutex);
-        Jim_DecrRefCount(jimClause);
+        if (jimClause->refCount == 0) Jim_FreeNewObj(jimClause);
         return newStmt;
     } else {
         // The new version is older than the version already in the
         // hold, so we just shouldn't do anything / we shouldn't
         // install the new statement.
         mutexUnlock(&db->holdsMutex);
-        Jim_DecrRefCount(jimClause);
+        if (jimClause->refCount == 0) Jim_FreeNewObj(jimClause);
         return STATEMENT_REF_NULL;
     }
 }

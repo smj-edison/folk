@@ -112,7 +112,7 @@ static Clause* jimObjsToTrieClause(int objc, Jim_Obj *const *objv) {
         newStr = malloc(len + 1); // +1 for null cap
         memcpy(newStr, str, len);
         newStr[len] = 0x00;
-        
+
         clause->terms[i] = newStr;
     }
     return clause;
@@ -195,7 +195,6 @@ Environment* clauseUnify(Jim_Obj* a, Jim_Obj* b) {
 // Assert! the time is 3
 static int AssertFunc(Jim_Interp *interp, int argc, Jim_Obj *const *argv) {
     Jim_Obj* clause = Jim_NewListObj(interp, argv + 1, argc - 1);
-    Jim_IncrRefCount(clause);
 
     Jim_Obj* scriptObj = interp->evalFrame->scriptObj;
     const char* sourceFileName;
@@ -221,7 +220,6 @@ static int AssertFunc(Jim_Interp *interp, int argc, Jim_Obj *const *argv) {
 // Retract! the time is /t/
 static int RetractFunc(Jim_Interp *interp, int argc, Jim_Obj *const *argv) {
     Jim_Obj* pattern = Jim_NewListObj(interp, argv + 1, argc - 1);
-    Jim_IncrRefCount(pattern);
 
     appropriateWorkQueuePush((WorkQueueItem) {
        .op = RETRACT,
@@ -238,8 +236,7 @@ void HoldStatementGlobally(const char *key, double version,
                            Jim_Obj *jimClause, long keepMs, const char *destructorCode,
                            const char *sourceFileName, int sourceLineNumber) {
 #ifdef TRACY_ENABLE
-    char *s = clauseToString(clause);
-    TracyCMessageFmt("hold: %.200s", s); free(s);
+    TracyCMessageFmt("hold: %.200s", Jim_String(interp, jimClause));
 #endif
 
     StatementRef oldRef; StatementRef newRef;
@@ -298,7 +295,7 @@ static StatementRef Say(Jim_Obj* jimClause, long keepMs, const char *destructorC
         parent = matchRef(db, self->currentMatch);
     } else {
         parent = MATCH_REF_NULL;
-        char *s = clauseToString(jimClauseToTrieClause(interp, jimClause));
+        char *s = Jim_String(interp, jimClause);
         fprintf(stderr, "Warning: Creating unparented Say (%.100s)\n",
                 s);
         free(s);
@@ -356,14 +353,14 @@ static int SayWithSourceFunc(Jim_Interp *interp, int argc, Jim_Obj *const *argv)
 static int DestructorFunc(Jim_Interp *interp, int argc, Jim_Obj *const *argv) {
     assert(argc == 2);
     Destructor* d = destructorNew(destructorHelper,
-                                  strdup(Jim_GetString(interp, argv[1], NULL)));
+                                  strdup(Jim_String(interp, argv[1])));
     matchAddDestructor(self->currentMatch, d);
     return JIM_OK;
 }
 static int UnmatchFunc(Jim_Interp *interp, int argc, Jim_Obj *const *argv) {
     assert(argc == 2);
 
-    const char *unmatchRefStr = Jim_GetString(interp, argv[1], NULL);
+    const char *unmatchRefStr = Jim_String(interp, argv[1]);
     MatchRef unmatchRef;
     if (sscanf(unmatchRefStr, "m%u:%u", &unmatchRef.idx, &unmatchRef.gen) != 2) {
         return JIM_ERR;
@@ -420,8 +417,7 @@ static int QuerySimpleFunc(Jim_Interp *interp, int argc, Jim_Obj *const *argv) {
 
     Jim_Obj* pattern = Jim_NewListObj(interp, argv + 1, argc - 1);
 #ifdef TRACY_ENABLE
-    char *s = clauseToString(pattern);
-    TracyCMessageFmt("query: %.200s", s); free(s);
+    TracyCMessageFmt("query: %.200s", Jim_String(interp, pattern));
 #endif
 
     Jim_Obj *retObj = QuerySimple(pattern);
@@ -640,19 +636,17 @@ static void runWhenBlock(StatementRef whenRef, Jim_Obj* whenPattern, StatementRe
     size_t whenClauseLen = whenClause->internalRep.listValue.len;
 
     // when the time is /t/ /body/ with environment /capturedEnvStack/
-    const char* body = Jim_GetString(interp, whenClauseTerms[whenClauseLen - 4], NULL);
+    Jim_Obj* bodyObj = Jim_DuplicateObj(interp, whenClauseTerms[whenClauseLen - 4], JIM_LIVE_LIST);
     Jim_Obj* capturedEnvStack = whenClauseTerms[whenClauseLen - 1];
     Jim_Obj* newEnvStack = Jim_NewListObj(interp, NULL, 0);
-
-    // why use the cache here? That way we only parse the code once.
-    Jim_Obj *bodyObj = cacheGetOrInsert(cache, interp, body);
-
-    Jim_IncrRefCount(stmtClause);
-    Jim_IncrRefCount(capturedEnvStack);
 
     // Set the source info for the bodyObj:
     const char *ptr;
     if (Jim_ScriptGetSourceFileName(interp, bodyObj, &ptr) == JIM_ERR) {
+        // apparently Jim_SetSourceInfo is happy to not check whether the object 
+        // has a usable string before setting it to a source value
+        Jim_String(interp, bodyObj);
+
         // HACK: We only set the source info if it's not already
         // there, because setting the source info destroys the
         // internal script representation and forces the code to be
@@ -661,9 +655,6 @@ static void runWhenBlock(StatementRef whenRef, Jim_Obj* whenPattern, StatementRe
                           Jim_NewStringObj(interp, statementSourceFileName(when), -1),
                           statementSourceLineNumber(when));
     }
-
-    // have to incr here, else Jim_SetSourceInfo will panic due to refCount being 2
-    Jim_IncrRefCount(bodyObj);
 
     {
         // Figure out all the bound match variables by unifying when &
@@ -674,9 +665,10 @@ static void runWhenBlock(StatementRef whenRef, Jim_Obj* whenPattern, StatementRe
         if (env->nBindings > 50) {
             fprintf(stderr, "runWhenBlock: Too many bindings in env: %d\n",
                     env->nBindings);
-            Jim_DecrRefCount(capturedEnvStack);
-            Jim_DecrRefCount(bodyObj);
-            Jim_DecrRefCount(stmtClause);
+            Jim_FreeIfZeroRef(capturedEnvStack);
+            Jim_FreeIfZeroRef(bodyObj);
+            Jim_FreeIfZeroRef(stmtClause);
+            Jim_FreeIfZeroRef(whenPattern);
             return;
         }
 
@@ -707,9 +699,10 @@ static void runWhenBlock(StatementRef whenRef, Jim_Obj* whenPattern, StatementRe
         if (stmt != NULL) {
             statementRelease(db, stmt);
         }
-        Jim_DecrRefCount(capturedEnvStack);
-        Jim_DecrRefCount(bodyObj);
-        Jim_DecrRefCount(stmtClause);
+        Jim_FreeIfZeroRef(capturedEnvStack);
+        Jim_FreeIfZeroRef(bodyObj);
+        Jim_FreeIfZeroRef(stmtClause);
+        Jim_FreeIfZeroRef(whenPattern);
         return;
     }
 
@@ -744,9 +737,10 @@ static void runWhenBlock(StatementRef whenRef, Jim_Obj* whenPattern, StatementRe
     }
     interp->signal_level--;
 
-    Jim_DecrRefCount(capturedEnvStack);
-    Jim_DecrRefCount(bodyObj);
-    Jim_DecrRefCount(stmtClause);
+    Jim_FreeIfZeroRef(capturedEnvStack);
+    Jim_FreeIfZeroRef(bodyObj);
+    Jim_FreeIfZeroRef(stmtClause);
+    Jim_FreeIfZeroRef(whenPattern);
 
     statementRelease(db, when);
     if (stmt != NULL) { statementRelease(db, stmt); }
@@ -755,7 +749,7 @@ static void runWhenBlock(StatementRef whenRef, Jim_Obj* whenPattern, StatementRe
         Jim_MakeErrorMessage(interp);
         const char *errorMessage = Jim_GetString(interp, Jim_GetResult(interp), NULL);
         fprintf(stderr, "Fatal (uncaught) error running When (%.100s):\n  %s\n",
-                body, errorMessage);
+                Jim_String(interp, bodyObj), errorMessage);
         Jim_FreeInterp(interp);
         exit(EXIT_FAILURE);
 
@@ -886,7 +880,7 @@ static void reactToNewStatement(StatementRef ref) {
             for (int i = 0; i < existingMatchingStatements->nResults; i++) {
                 pushRunWhenBlock(
                     ref,
-                    pattern,
+                    Jim_DuplicateObj(interp, pattern, JIM_LIVE_LIST),
                     existingMatchingStatements->results[i]
                 );
             }
@@ -907,6 +901,8 @@ static void reactToNewStatement(StatementRef ref) {
                 free(existingMatchingStatements);
                 clauseFree(claimizedTriePattern);
             }
+
+            Jim_FreeNewObj(pattern);
         }
     }
 
@@ -927,7 +923,7 @@ static void reactToNewStatement(StatementRef ref) {
     // Solution? Some kind of lookaside buffer with a list of patterns
     // that are being contended over? Some kind of locks? Reversible
     // transactions? Like is this whole thing a transaction.
-    
+
     // Trigger any already-existing reactions to the addition of this
     // statement (look for Whens that are already in the database).
     {
@@ -1099,7 +1095,6 @@ void workerRun(WorkQueueItem item) {
 
 extern Statement* statementUnsafeGet(Db* db, StatementRef ref);
 void traceItem(char* buf, size_t bufsz, WorkQueueItem item) {
-    int threadIndex = self->index;
     if (item.op == ASSERT) {
         Clause* trieClause = jimClauseToTrieClause(interp, item.assert.clause);
         snprintf(buf, bufsz, "Assert (%.100s)",

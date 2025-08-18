@@ -381,6 +381,7 @@ extern "C" {
    stdatomic.h every time you want to call one of these */
 void Jim_IncrRefCount(Jim_Obj *objPtr);
 void Jim_DecrRefCount(Jim_Obj *objPtr);
+void Jim_FreeIfZeroRef(Jim_Obj *objPtr);
 int Jim_IsShared(Jim_Obj *objPtr);
 int Jim_SameInterp(struct Jim_Interp *interp, Jim_Obj *objPtr);
 

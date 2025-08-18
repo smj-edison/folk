@@ -2479,6 +2479,11 @@ inline void Jim_DecrRefCount(Jim_Obj *objPtr) {
     }
 }
 
+inline void Jim_FreeIfZeroRef(Jim_Obj *objPtr) {
+    Jim_IncrRefCount(objPtr);
+    Jim_DecrRefCount(objPtr);
+}
+
 inline int Jim_IsShared(Jim_Obj *objPtr) {
     return atomic_load_explicit(&(objPtr->refCount), memory_order_relaxed) > 1;
 }
