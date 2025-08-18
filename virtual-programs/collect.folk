@@ -11,10 +11,10 @@ $cc include <string.h>
 $cc include "trie.h"
 $cc code {
     extern void HoldStatementGlobally(const char *key, double version,
-                    Jim_Obj *jimClause, long keepMs, const char *destructorCode,
-                    const char *sourceFileName, int sourceLineNumber);
+                Jim_Obj *jimClause, long keepMs, const char *destructorCode,
+                const char *sourceFileName, int sourceLineNumber);
+    extern Jim_Obj* claimizeClause(Jim_Obj* clause);
     extern Jim_Obj* QuerySimple(Jim_Obj* pattern);
-    extern Clause* claimizeClause(Clause* clause);
     Clause* jimClauseToTrieClause(Jim_Interp* interp, Jim_Obj* obj);
 
     char* makeCollectKey(Jim_Interp* interp, Jim_Obj* patternObj) {
@@ -32,8 +32,6 @@ $cc code {
 }
 
 $cc proc Recollect! {Jim_Obj* patternObj} void {
-    Jim_IncrRefCount(patternObj);
-
     // First, query for collect patterns.
     Jim_Obj* collectorTerms[] = {
         Jim_NewStringObjNoInterp("/someone/", -1),
@@ -56,17 +54,12 @@ $cc proc Recollect! {Jim_Obj* patternObj} void {
                               Jim_NewObjNoInterp(), 0, NULL, NULL, 0);
     } else {
         Jim_Obj* matchesObj = QuerySimple(patternObj);
-
-        Clause* pattern = jimClauseToTrieClause(patternObj);
-        Clause* claimizedPattern = claimizeClause(interp, pattern);
+        Jim_Obj* claimizedPattern = claimizeClause(patternObj);
         if (claimizedPattern != NULL) {
             Jim_Obj* claimizedMatchesObj = QuerySimple(claimizedPattern);
             Jim_ListAppendList(interp, matchesObj, claimizedMatchesObj);
-            Jim_DecrRefCount(claimizedMatchesObj);
-            clauseFree(claimizedPattern);
+            Jim_FreeNewObj(claimizedPattern);
         }
-        clauseFree(pattern);
-
 
         Jim_Obj* collectedTerms[] = {
             Jim_NewStringObjNoInterp("virtual-programs/collect.folk", -1),
@@ -85,8 +78,6 @@ $cc proc Recollect! {Jim_Obj* patternObj} void {
 
         HoldStatementGlobally(makeCollectKey(interp, patternObj), version++,
                               collectedClause, 0, NULL, NULL, 0);
-
-        Jim_FreeNewObj(matchesObj);
     }
 
     Jim_FreeNewObj(collectorsObj);

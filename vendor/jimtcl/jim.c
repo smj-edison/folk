@@ -2473,7 +2473,8 @@ inline void Jim_IncrRefCount(Jim_Obj *objPtr) {
 inline void Jim_DecrRefCount(Jim_Obj *objPtr) {
     int res = atomic_fetch_sub_explicit(&(objPtr->refCount), 1, memory_order_release);
 
-    if (res == 0) {
+    // if < 0, Jim_FreeObj will (appropriately) panic
+    if (res <= 0) {
         Jim_FreeObj(objPtr);
     }
 }
@@ -4671,15 +4672,12 @@ static const Jim_ObjType commandObjType = {
  * case the lookup is performed and the cache updated.
  *
  * Respects the 'upcall' setting.
- * 
- * Panics if called with an object from another interpreter.
  */
 Jim_Cmd *Jim_GetCommand(Jim_Interp *interp, Jim_Obj *objPtr, int flags)
 {
     Jim_Cmd *cmd;
 
-    JimPanic((!Jim_SameInterp(interp, objPtr),
-        "object from another interpreter when running Jim_GetCommand"));
+    objPtr = DupIfWrongInterp(interp, objPtr, JIM_TEMP_LIST);
 
     /* make sure objPtr has a string representation */
     Jim_GetStringSameInterp(interp, objPtr, NULL);
@@ -6360,7 +6358,7 @@ static const Jim_ObjType listObjType = {
     JIM_TYPE_NONE,
 };
 
-Jim_ObjType *Jim_ListType()
+const Jim_ObjType *Jim_ListType()
 {
     return &listObjType;
 }
@@ -6562,6 +6560,8 @@ static int BackslashQuoteString(const char *s, int len, char *q)
 /* Currently all callsites have objPtr as non-shared. */
 static void JimMakeListStringRep(Jim_Interp *interp, Jim_Obj *objPtr, Jim_Obj **objv, int objc)
 {
+    int tempListLen = Jim_GetTempListLen(interp);
+
     #define STATIC_QUOTING_LEN 32
     int i, bufLen, realLength;
     const char *strRep;
@@ -6644,6 +6644,8 @@ static void JimMakeListStringRep(Jim_Interp *interp, Jim_Obj *objPtr, Jim_Obj **
     if (quotingType != staticQuoting) {
         Jim_Free(quotingType);
     }
+
+    Jim_RewindTempListTo(interp, tempListLen);
 }
 
 static void UpdateStringOfList(Jim_Interp *interp, struct Jim_Obj *objPtr)
@@ -9944,6 +9946,8 @@ static int JimExprGetTermBoolean(Jim_Interp *interp, struct JimExprNode *node)
 /* Panics if called with an object from another interpreter. */
 int Jim_EvalExpression(Jim_Interp *interp, Jim_Obj *exprObjPtr)
 {
+    int tempListLen = Jim_GetTempListLen(interp);
+
     struct ExprTree *expr;
     int retcode = JIM_OK;
 
@@ -10049,6 +10053,7 @@ noopt:
 
 done:
     Jim_DecrRefCount(exprObjPtr);
+    Jim_RewindTempListTo(interp, tempListLen);
 
     return retcode;
 }
@@ -11212,11 +11217,9 @@ int Jim_EvalObjList(Jim_Interp *interp, Jim_Obj *listPtr)
     return JimEvalObjList(interp, listPtr);
 }
 
-/* Panics if called with an object from another interpreter. */
 int Jim_EvalObj(Jim_Interp *interp, Jim_Obj *scriptObjPtr)
 {
-    JimPanic((!Jim_SameInterp(interp, scriptObjPtr),
-        "object from another interpreter when running Jim_EvalObj"));
+    scriptObjPtr = DupIfWrongInterp(interp, scriptObjPtr, JIM_TEMP_LIST);
 
     int i;
     size_t tempListLen = Jim_GetTempListLen(interp);
@@ -11645,17 +11648,18 @@ static int JimCallProcedure(Jim_Interp *interp, Jim_Cmd *cmd, int argc, Jim_Obj 
 
             /* It is possible to rename args. */
             if (cmd->u.proc.arglist[d].defaultObjPtr) {
-                nameObjPtr =cmd->u.proc.arglist[d].defaultObjPtr;
+                Jim_DecrRefCount(nameObjPtr);
+                nameObjPtr = cmd->u.proc.arglist[d].defaultObjPtr;
+                Jim_IncrRefCount(nameObjPtr);
             }
             retcode = Jim_SetVariable(interp, nameObjPtr, listObjPtr);
+            Jim_DecrRefCount(nameObjPtr);
+
             if (retcode != JIM_OK) {
-                Jim_DecrRefCount(nameObjPtr);
                 goto badargset;
             }
 
             i += argsLen;
-
-            Jim_DecrRefCount(nameObjPtr);
             continue;
         }
 
@@ -11667,12 +11671,12 @@ static int JimCallProcedure(Jim_Interp *interp, Jim_Cmd *cmd, int argc, Jim_Obj 
             /* Ran out, so use the default */
             retcode = Jim_SetVariable(interp, nameObjPtr, cmd->u.proc.arglist[d].defaultObjPtr);
         }
-        if (retcode != JIM_OK) {
-            Jim_DecrRefCount(nameObjPtr);
-            goto badargset;
-        }
 
         Jim_DecrRefCount(nameObjPtr);
+
+        if (retcode != JIM_OK) {
+            goto badargset;
+        }
     }
 
     if (interp->traceCmdObj == NULL ||

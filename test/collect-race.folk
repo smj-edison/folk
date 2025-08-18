@@ -11,6 +11,8 @@ When we should collect {
 }
 
 #################
+# give collect.folk some time to compile
+sleep 2
 
 for {set i 0} {$i < 5} {incr i} {
     puts "$i ---------------"
@@ -27,3 +29,5 @@ for {set i 0} {$i < 5} {incr i} {
     set results [Query! the collected matches for [list an item is /item/] are /matches/]
     assert {[llength $results] == 0}
 }
+
+__conclude 0

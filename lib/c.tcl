@@ -130,8 +130,8 @@ class C {
         size_t { expr {{ size_t $argname; __ENSURE_OK(Jim_GetLong(interp, $obj, (long *)&$argname)); }}}
         intptr_t { expr {{ intptr_t $argname; __ENSURE_OK(Jim_GetLong(interp, $obj, (long *)&$argname)); }}}
         uint16_t { expr {{ uint16_t $argname; __ENSURE_OK(Jim_GetLong(interp, $obj, (int *)&$argname)); }}}
-        uint32_t { expr {{ uint32_t $argname; __ENSURE(sscanf(interp, Jim_String(interp, $obj), "%" PRIu32, &$argname) == 1); }}}
-        uint64_t { expr {{ uint64_t $argname; __ENSURE(sscanf(interp, Jim_String(interp, $obj), "%" PRIu64, &$argname) == 1); }}}
+        uint32_t { expr {{ uint32_t $argname; __ENSURE(sscanf(Jim_String(interp, $obj), "%" PRIu32, &$argname) == 1); }}}
+        uint64_t { expr {{ uint64_t $argname; __ENSURE(sscanf(Jim_String(interp, $obj), "%" PRIu64, &$argname) == 1); }}}
         char* { expr {{ char* $argname = (char*) Jim_String(interp, $obj); }} }
         Jim_Obj* { expr {{ Jim_Obj* $argname = $obj; }}}
         default {
@@ -384,7 +384,7 @@ C method struct {type fields} {
         } }] "\n"]
         Jim_ObjType* $[set type]_ObjType;
 
-        void $[set type]_freeIntRepProc(Jim_Interp* interp, Jim_Obj *objPtr) {
+        void $[set type]_freeIntRepProc(Jim_Obj *objPtr) {
             if (objPtr->internalRep.ptrIntValue.int1 == 1) {
                 free((char*)objPtr->internalRep.ptrIntValue.ptr);
             }
@@ -394,7 +394,7 @@ C method struct {type fields} {
             dupPtr->internalRep.ptrIntValue.int1 = 1;
             memcpy(dupPtr->internalRep.ptrIntValue.ptr, srcPtr->internalRep.ptrIntValue.ptr, sizeof($type));
         }
-        void $[set type]_updateStringProc(Jim_Obj *objPtr) {
+        void $[set type]_updateStringProc(Jim_Interp* interp, Jim_Obj *objPtr) {
             $[set type] *robj = ($[set type] *) objPtr->internalRep.ptrIntValue.ptr;
 
             const char *format = "$[join [lmap fieldname $fieldnames {
@@ -411,7 +411,7 @@ C method struct {type fields} {
             snprintf(objPtr->bytes, objPtr->length + 1, format, $[join [lmap fieldname $fieldnames {expr {"Jim_String(interp, robj_$fieldname)"}}] ", "]);
             $[join [lmap {fieldtype fieldname} $fields {
                 csubst {
-                    Jim_FreeNewObj(interp, robj_$fieldname);
+                    Jim_FreeNewObj(robj_$fieldname);
                 }
             }] "\n"]
         }
@@ -433,7 +433,7 @@ C method struct {type fields} {
                 }
             }] "\n"]
 
-            Jim_FreeIntRep(interp, objPtr);
+            Jim_FreeIntRep(objPtr);
             objPtr->typePtr = $[set type]_ObjType;
             objPtr->internalRep.ptrIntValue.ptr = robj;
             objPtr->internalRep.ptrIntValue.int1 = 1;
@@ -467,7 +467,7 @@ C method struct {type fields} {
     }]
 
     $self rtype $type {
-        $robj = Jim_NewObj(interp);
+        $robj = Jim_NewObj(interp, JIM_LIVE_LIST);
         $robj->bytes = NULL;
         $robj->typePtr = $[set rtype]_ObjType;
         $robj->internalRep.ptrIntValue.ptr = malloc(sizeof($[set rtype]));

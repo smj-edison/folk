@@ -10,7 +10,7 @@ set trieLib [apply {{} {
 
         extern void dbLockClauseToStatementRef(Db* db);
         extern void dbUnlockClauseToStatementRef(Db* db);
-        extern Trie* dbGetClauseToStatementRef(Db* db);
+        extern const Trie* dbGetClauseToStatementRef(Db* db);
 
 #if __has_include ("tracy/TracyC.h")
 #include "tracy/TracyC.h"
@@ -49,7 +49,7 @@ void tfree(void *ptr) {
 
 #endif
     }
-    $cc proc tclify {Trie* trie} Jim_Obj* {
+    $cc proc tclify {const\ Trie* trie} Jim_Obj* {
         int objc = 3 + trie->branchesCount;
         Jim_Obj* objv[objc];
         objv[0] = Jim_ObjPrintf("x%" PRIxPTR, (uintptr_t) trie);
@@ -63,7 +63,7 @@ void tfree(void *ptr) {
     }
     $cc proc dbTrieTclify {} Jim_Obj* {
         dbLockClauseToStatementRef(db);
-        Trie* trie = dbGetClauseToStatementRef(db);
+        const Trie* trie = dbGetClauseToStatementRef(db);
         Jim_Obj* ret = tclify(trie);
         dbUnlockClauseToStatementRef(db);
         return ret;
@@ -74,7 +74,7 @@ void tfree(void *ptr) {
         clause->nTerms = nTerms;
         for (int i = 0; i < nTerms; i++) {
             Jim_Obj* termObj = Jim_ListGetIndex(interp, clauseObj, i);
-            clause->terms[i] = strdup(interp, Jim_GetString(termObj, NULL));
+            clause->terms[i] = strdup(Jim_String(interp, termObj));
         }
         return clause;
     }

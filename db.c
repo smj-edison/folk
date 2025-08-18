@@ -910,8 +910,20 @@ StatementRef dbInsertOrReuseStatement(Db* db, Jim_Interp* interp,
     }
 
     // everything following this is going to be _incredibly_ slow if
-    // it's not a list type (just a sanity check)
-    assert(jimClause->typePtr == Jim_ListType());
+    // it's not a list type
+    if (jimClause->typePtr != Jim_ListType()) {
+        Jim_Obj* jimClauseAsList = Jim_DupIfShared(interp, jimClause, JIM_LIVE_LIST);
+        // guaranteed to shimmer as it's not shared
+        Jim_ListLength(interp, jimClauseAsList);
+
+        if (jimClauseAsList != jimClause) {
+            // potentially delete if refCount == 0
+            Jim_IncrRefCount(jimClause);
+            Jim_DecrRefCount(jimClause);
+        }
+
+        jimClause = jimClauseAsList;
+    }
 
     Match* parentMatch = NULL;
     if (!matchRefIsNull(parentMatchRef)) {

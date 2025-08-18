@@ -1,3 +1,4 @@
+return
 namespace eval ::BlobDetect {
     set cc [c create]
     $cc cflags -I$::env(HOME)/apriltag $::env(HOME)/folk/vendor/blobdetect/hk.c

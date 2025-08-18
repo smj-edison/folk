@@ -117,13 +117,6 @@ static Clause* jimObjsToTrieClause(int objc, Jim_Obj *const *objv) {
     }
     return clause;
 }
-static Jim_Obj* termsToJimObj(Jim_Interp* interp, int nTerms, char* terms[]) {
-    Jim_Obj* termObjs[nTerms];
-    for (int i = 0; i < nTerms; i++) {
-        termObjs[i] = Jim_NewStringObj(interp, terms[i], strlen(terms[i]));
-    }
-    return Jim_NewListObj(interp, termObjs, nTerms);
-}
 
 static void destructorHelper(void* arg) {
     // This dispatches an evaluation task to the global queue, so that
@@ -152,7 +145,7 @@ typedef struct Environment {
 // building up a mapping of strings to Tcl objects. Caller must free
 // the returned Environment*.
 // "a" and "b" must have a list internal representation.
-Environment* clauseUnify(Jim_Interp* interp, Jim_Obj* a, Jim_Obj* b) {
+Environment* clauseUnify(Jim_Obj* a, Jim_Obj* b) {
     a = DupIfSharedAndWrongRep(interp, a, Jim_ListType(), JIM_TEMP_LIST);
     b = DupIfSharedAndWrongRep(interp, b, Jim_ListType(), JIM_TEMP_LIST);
 
@@ -387,7 +380,7 @@ static int UnmatchFunc(Jim_Interp *interp, int argc, Jim_Obj *const *argv) {
 Jim_Obj* QuerySimple(Jim_Obj* pattern) {
     // pattern can be on the temp list, as its child elements
     // can outlast the temp list being cleared
-    pattern = Jim_DupIfShared(interp, pattern, JIM_TEMP_LIST);
+    pattern = DupIfSharedAndWrongRep(interp, pattern, Jim_ListType(), JIM_TEMP_LIST);
     // make sure it has a list rep
     Jim_ListLength(interp, pattern);
 
@@ -400,7 +393,7 @@ Jim_Obj* QuerySimple(Jim_Obj* pattern) {
         Statement* result = statementAcquire(db, rs->results[i]);
         if (result == NULL) { continue; }
 
-        Environment* env = clauseUnify(interp, pattern, statementJimClause(result));
+        Environment* env = clauseUnify(pattern, statementJimClause(result));
         assert(env != NULL);
         Jim_Obj* envDict[(env->nBindings + 1) * 2];
         envDict[0] = Jim_NewStringObj(interp, "__ref", -1);
@@ -432,7 +425,7 @@ static int QuerySimpleFunc(Jim_Interp *interp, int argc, Jim_Obj *const *argv) {
 #endif
 
     Jim_Obj *retObj = QuerySimple(pattern);
-    Jim_FreeObj(pattern);
+    Jim_FreeNewObj(pattern);
 
     Jim_SetResult(interp, retObj);
     return JIM_OK;
@@ -675,7 +668,7 @@ static void runWhenBlock(StatementRef whenRef, Jim_Obj* whenPattern, StatementRe
     {
         // Figure out all the bound match variables by unifying when &
         // stmt:
-        Environment* env = clauseUnify(interp, whenPattern, stmtClause);
+        Environment* env = clauseUnify(whenPattern, stmtClause);
         assert(env != NULL);
 
         if (env->nBindings > 50) {
@@ -1154,6 +1147,7 @@ WorkQueueItem workerSteal() {
 }
 void workerLoop() {
     int64_t schedtick = 0;
+
     for (;;) {
         schedtick++;
         if (interp->sigmask & (1 << SIGUSR1)) {

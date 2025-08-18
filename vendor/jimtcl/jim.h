@@ -874,7 +874,7 @@ JIM_EXPORT int Jim_GetIndex (Jim_Interp *interp, Jim_Obj *objPtr,
         int *indexPtr);
 
 /* list object */
-JIM_EXPORT Jim_ObjType * Jim_ListType ();
+JIM_EXPORT const Jim_ObjType * Jim_ListType ();
 JIM_EXPORT Jim_Obj * Jim_NewListObj (Jim_Interp *interp,
         Jim_Obj *const *elements, int len);
 JIM_EXPORT Jim_Obj * Jim_NewListObjNoInterp (Jim_Obj *const *elements, int len);

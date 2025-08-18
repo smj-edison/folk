@@ -306,7 +306,7 @@ int Jim_RegexpCmd(Jim_Interp *interp, int argc, Jim_Obj *const *argv)
             result = Jim_SetVariable(interp, argv[i], resultObj);
 
             if (result != JIM_OK) {
-                Jim_FreeObj(resultObj);
+                Jim_FreeNewObj(resultObj);
                 break;
             }
         }
@@ -616,7 +616,7 @@ cmd_error:
                 Jim_SetResultInt(interp, num_matches);
             }
             else {
-                Jim_FreeObj(resultObj);
+                Jim_FreeNewObj(resultObj);
             }
         }
         else {
@@ -625,7 +625,7 @@ cmd_error:
         }
     }
     else {
-        Jim_FreeObj(resultObj);
+        Jim_FreeNewObj(resultObj);
     }
 
     if (opt_command) {
