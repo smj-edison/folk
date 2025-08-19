@@ -421,6 +421,7 @@ static StatementRef statementNew(Db* db, Jim_Obj* jimClause,
 
     // We should now have exclusive access to stmt, as its rc
     // is 0 and we were the ones who made it alive
+
     Jim_IncrRefCount(jimClause);
 
     stmt->jimClause = jimClause;
@@ -910,15 +911,10 @@ StatementRef dbInsertOrReuseStatement(Db* db, Jim_Interp* interp,
 
     // everything following this is going to be _incredibly_ slow if
     // it's not a list type
-    if (jimClause->typePtr != Jim_ListType()) {
-        if (Jim_IsShared(jimClause)) {
-            Jim_Obj* jimClauseAsList = Jim_DuplicateObj(interp, jimClause, JIM_LIVE_LIST);
-            jimClause = jimClauseAsList;
-        }
-
-        // guaranteed to shimmer as it's not shared
-        Jim_ListLength(interp, jimClause);
-    }
+    jimClause = DupIfSharedAndWrongRep(interp, jimClause, Jim_ListType(), JIM_LIVE_LIST);
+    // guaranteed to shimmer as it's not shared
+    Jim_ListLength(interp, jimClause);
+    Jim_IncrRefCount(jimClause);
 
     Match* parentMatch = NULL;
     if (!matchRefIsNull(parentMatchRef)) {
@@ -926,6 +922,7 @@ StatementRef dbInsertOrReuseStatement(Db* db, Jim_Interp* interp,
         parentMatch = matchAcquire(db, parentMatchRef);
         if (parentMatch == NULL) {
             setReusedStatementRef(STATEMENT_REF_NULL);
+            Jim_DecrRefCount(jimClause);
             return STATEMENT_REF_NULL; // Abort!
         }
 
@@ -935,6 +932,7 @@ StatementRef dbInsertOrReuseStatement(Db* db, Jim_Interp* interp,
             matchRelease(db, parentMatch);
 
             setReusedStatementRef(STATEMENT_REF_NULL);
+            Jim_DecrRefCount(jimClause);
             return STATEMENT_REF_NULL; // Abort!
         }
 
@@ -1007,6 +1005,7 @@ StatementRef dbInsertOrReuseStatement(Db* db, Jim_Interp* interp,
                     }
 
                     setReusedStatementRef(existingRefs[0]);
+                    Jim_DecrRefCount(jimClause);
                     return STATEMENT_REF_NULL;
                 } else {
                     // Reuse failed, but not for operation-aborting
@@ -1052,6 +1051,7 @@ StatementRef dbInsertOrReuseStatement(Db* db, Jim_Interp* interp,
     statementRelease(db, newStmt);
 
     setReusedStatementRef(STATEMENT_REF_NULL);
+    Jim_DecrRefCount(jimClause);
     return ref;
 
 #undef setReusedStatementRef
@@ -1146,6 +1146,7 @@ StatementRef dbHoldStatement(Db* db, Jim_Interp* interp,
     if (outOldStatement) { *outOldStatement = STATEMENT_REF_NULL; }
 
     mutexLock(&db->holdsMutex);
+    Jim_IncrRefCount(jimClause);
 
     Hold* hold = NULL;
     for (int i = 0; i < sizeof(db->holds)/sizeof(db->holds[0]); i++) {
@@ -1184,7 +1185,8 @@ StatementRef dbHoldStatement(Db* db, Jim_Interp* interp,
         if (oldStmtPtr && Jim_StringEqObj(interp, jimClause, statementJimClause(oldStmtPtr))) {
             statementRelease(db, oldStmtPtr);
             mutexUnlock(&db->holdsMutex);
-            if (jimClause->refCount == 0) Jim_FreeNewObj(jimClause);
+            Jim_DecrRefCount(jimClause);
+
             return STATEMENT_REF_NULL;
         }
 
@@ -1254,14 +1256,14 @@ StatementRef dbHoldStatement(Db* db, Jim_Interp* interp,
         if (outOldStatement) { *outOldStatement = oldStmt; }
 
         mutexUnlock(&db->holdsMutex);
-        if (jimClause->refCount == 0) Jim_FreeNewObj(jimClause);
+        Jim_DecrRefCount(jimClause);
         return newStmt;
     } else {
         // The new version is older than the version already in the
         // hold, so we just shouldn't do anything / we shouldn't
         // install the new statement.
         mutexUnlock(&db->holdsMutex);
-        if (jimClause->refCount == 0) Jim_FreeNewObj(jimClause);
+        Jim_DecrRefCount(jimClause);
         return STATEMENT_REF_NULL;
     }
 }

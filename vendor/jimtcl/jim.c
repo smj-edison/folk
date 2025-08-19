@@ -4534,6 +4534,7 @@ static Jim_Cmd *JimCreateProcedureCmd(Jim_Interp *interp, Jim_Obj *argListObjPtr
         if (len == 0) {
             Jim_SetResultString(interp, "argument with no name", -1);
 err:
+            cmdPtr->u.proc.argListLen = 0;
             JimDecrCmdRefCount(interp, cmdPtr);
             return NULL;
         }

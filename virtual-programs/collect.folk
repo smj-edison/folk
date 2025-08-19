@@ -51,7 +51,7 @@ $cc proc Recollect! {Jim_Obj* patternObj} void {
         Clause* emptyClause = malloc(SIZEOF_CLAUSE(0));
         emptyClause->nTerms = 0;
         HoldStatementGlobally(makeCollectKey(interp, patternObj), version++,
-                              Jim_NewObjNoInterp(), 0, NULL, NULL, 0);
+                              Jim_NewEmptyStringObj(interp), 0, NULL, NULL, 0);
     } else {
         Jim_Obj* matchesObj = QuerySimple(patternObj);
         Jim_Obj* claimizedPattern = claimizeClause(patternObj);

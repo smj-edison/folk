@@ -206,6 +206,8 @@ static int AssertFunc(Jim_Interp *interp, int argc, Jim_Obj *const *argv) {
         sourceLineNumber = -1;
     }
 
+    Jim_IncrRefCount(clause);
+
     appropriateWorkQueuePush((WorkQueueItem) {
        .op = ASSERT,
        .assert = {
@@ -220,6 +222,8 @@ static int AssertFunc(Jim_Interp *interp, int argc, Jim_Obj *const *argv) {
 // Retract! the time is /t/
 static int RetractFunc(Jim_Interp *interp, int argc, Jim_Obj *const *argv) {
     Jim_Obj* pattern = Jim_NewListObj(interp, argv + 1, argc - 1);
+
+    Jim_IncrRefCount(pattern);
 
     appropriateWorkQueuePush((WorkQueueItem) {
        .op = RETRACT,
@@ -656,6 +660,12 @@ static void runWhenBlock(StatementRef whenRef, Jim_Obj* whenPattern, StatementRe
                           statementSourceLineNumber(when));
     }
 
+    // whenPattern was already incremented when pushing it
+    Jim_IncrRefCount(stmtClause);
+    Jim_IncrRefCount(bodyObj);
+    Jim_IncrRefCount(capturedEnvStack);
+    Jim_IncrRefCount(newEnvStack);
+
     {
         // Figure out all the bound match variables by unifying when &
         // stmt:
@@ -665,11 +675,7 @@ static void runWhenBlock(StatementRef whenRef, Jim_Obj* whenPattern, StatementRe
         if (env->nBindings > 50) {
             fprintf(stderr, "runWhenBlock: Too many bindings in env: %d\n",
                     env->nBindings);
-            Jim_FreeIfZeroRef(capturedEnvStack);
-            Jim_FreeIfZeroRef(bodyObj);
-            Jim_FreeIfZeroRef(stmtClause);
-            Jim_FreeIfZeroRef(whenPattern);
-            return;
+            goto jimObjDecr;
         }
 
         Jim_Obj* objs[env->nBindings*2];
@@ -699,11 +705,7 @@ static void runWhenBlock(StatementRef whenRef, Jim_Obj* whenPattern, StatementRe
         if (stmt != NULL) {
             statementRelease(db, stmt);
         }
-        Jim_FreeIfZeroRef(capturedEnvStack);
-        Jim_FreeIfZeroRef(bodyObj);
-        Jim_FreeIfZeroRef(stmtClause);
-        Jim_FreeIfZeroRef(whenPattern);
-        return;
+        goto jimObjDecr;
     }
 
     // Rule: you should never be holding a lock while doing a Tcl
@@ -737,11 +739,6 @@ static void runWhenBlock(StatementRef whenRef, Jim_Obj* whenPattern, StatementRe
     }
     interp->signal_level--;
 
-    Jim_FreeIfZeroRef(capturedEnvStack);
-    Jim_FreeIfZeroRef(bodyObj);
-    Jim_FreeIfZeroRef(stmtClause);
-    Jim_FreeIfZeroRef(whenPattern);
-
     statementRelease(db, when);
     if (stmt != NULL) { statementRelease(db, stmt); }
 
@@ -763,10 +760,18 @@ static void runWhenBlock(StatementRef whenRef, Jim_Obj* whenPattern, StatementRe
     matchCompleted(self->currentMatch);
     matchRelease(db, self->currentMatch);
     self->currentMatch = NULL;
+
+jimObjDecr:
+    Jim_DecrRefCount(whenPattern);
+    Jim_DecrRefCount(stmtClause);
+    Jim_DecrRefCount(bodyObj);
+    Jim_DecrRefCount(capturedEnvStack);
+    Jim_DecrRefCount(newEnvStack);
 }
 // Copies the whenPattern Clause and all terms so it can be owned (and
 // freed) by the eventual handler of the block.
 static void pushRunWhenBlock(StatementRef when, Jim_Obj* whenPattern, StatementRef stmt) {
+    Jim_IncrRefCount(whenPattern);
     appropriateWorkQueuePush((WorkQueueItem) {
        .op = RUN,
        .run = { .when = when, .whenPattern = whenPattern, .stmt = stmt }
@@ -880,7 +885,7 @@ static void reactToNewStatement(StatementRef ref) {
             for (int i = 0; i < existingMatchingStatements->nResults; i++) {
                 pushRunWhenBlock(
                     ref,
-                    Jim_DuplicateObj(interp, pattern, JIM_LIVE_LIST),
+                    pattern,
                     existingMatchingStatements->results[i]
                 );
             }
@@ -901,8 +906,6 @@ static void reactToNewStatement(StatementRef ref) {
                 free(existingMatchingStatements);
                 clauseFree(claimizedTriePattern);
             }
-
-            Jim_FreeNewObj(pattern);
         }
     }
 
@@ -1032,6 +1035,8 @@ void workerRun(WorkQueueItem item) {
         if (!statementRefIsNull(ref)) {
             reactToNewStatement(ref);
         }
+
+        Jim_DecrRefCount(item.assert.clause);
         free(item.assert.sourceFileName);
 
     } else if (item.op == RETRACT) {
