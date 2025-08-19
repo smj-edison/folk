@@ -675,7 +675,7 @@ static void JimPanicDump(int condition, const char *fmt, ...)
     }
 #endif
 
-    exit(1);
+    abort();
 }
 
 /* -----------------------------------------------------------------------------
@@ -7192,10 +7192,6 @@ int Jim_ListIndex(Jim_Interp *interp, Jim_Obj *listPtr, int idx, Jim_Obj **objPt
 static int Jim_ListIndices(Jim_Interp *interp, Jim_Obj *listPtr,
     Jim_Obj *const *indexv, int indexc, Jim_Obj **resultObj, int flags)
 {
-    /* to prevent lots of duplications when using Jim_GetIndex (see note at bottom of
-     * this function as to why it needs to be on the live list) */
-    listPtr = DupIfSharedAndWrongRep(interp, listPtr, &listObjType, JIM_LIVE_LIST);
-
     int i;
     int static_idxes[5];
     int *idxes = static_idxes;
@@ -7216,6 +7212,11 @@ static int Jim_ListIndices(Jim_Interp *interp, Jim_Obj *listPtr,
     }
 
     for (i = 0; i < indexc; i++) {
+        int duplicated = Jim_IsShared(listPtr) && listPtr->typePtr != &listObjType;
+        if (duplicated) {
+            listPtr = Jim_DuplicateObj(interp, listPtr, JIM_LIVE_LIST);
+        }
+
         Jim_Obj *objPtr = Jim_ListGetIndex(interp, listPtr, idxes[i]);
         if (!objPtr) {
             if (flags & JIM_ERRMSG) {
@@ -7227,9 +7228,20 @@ static int Jim_ListIndices(Jim_Interp *interp, Jim_Obj *listPtr,
                 }
             }
             ret = -1;
+            Jim_FreeIfZeroRef(listPtr);
             goto err;
         }
-        listPtr = objPtr;
+
+        if (duplicated) {
+            // make sure the child item stays alive (rc++), but then pretend like
+            // it's a new object (rc = 0) without freeing it
+            Jim_IncrRefCount(objPtr);
+            Jim_FreeNewObj(listPtr);
+            objPtr->refCount = 0;
+            listPtr = objPtr;
+        } else {
+            listPtr = objPtr;
+        }
     }
     *resultObj = listPtr;
 err:
@@ -7239,8 +7251,6 @@ err:
     /* through several calls, listPtr may end up being passed into SetListFromAnyUnshared
      * which tracks listPtr as a source (Jim_SetSourceInfo), so we can't put it on the
      * temp list */
-    Jim_IncrRefCount(listPtr);
-    Jim_DecrRefCount(listPtr);
 
     return ret;
 }
@@ -12454,7 +12464,7 @@ static int Jim_WhileCoreCommand(Jim_Interp *interp, int argc, Jim_Obj *const *ar
     while (1) {
         int boolean = 0, retval;
 
-        
+
         if ((retval = Jim_GetBoolFromExpr(interp, conditionObjPtr, &boolean)) != JIM_OK)
             return retval;
         if (!boolean)
@@ -14423,6 +14433,8 @@ static Jim_Obj *JimStringMap(Jim_Interp *interp, Jim_Obj *mapListObjPtr,
     const char *str, *noMatchStart = NULL;
     int strLen, i;
     Jim_Obj *resultObjPtr;
+
+    mapListObjPtr = DupIfSharedAndWrongRep(interp, mapListObjPtr, &listObjType, JIM_TEMP_LIST);
 
     numMaps = Jim_ListLength(interp, mapListObjPtr);
     if (numMaps % 2) {
