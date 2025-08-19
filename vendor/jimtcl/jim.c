@@ -2272,6 +2272,7 @@ void Jim_FreeObj(Jim_Obj *objPtr)
     if (objPtr->bytes != NULL) {
         if (objPtr->bytes != JimEmptyStringRep)
             Jim_Free(objPtr->bytes);
+        objPtr->bytes = NULL;
     }
 
     Jim_Free(objPtr);
@@ -2471,7 +2472,7 @@ inline void Jim_IncrRefCount(Jim_Obj *objPtr) {
 }
 
 inline void Jim_DecrRefCount(Jim_Obj *objPtr) {
-    int res = atomic_fetch_sub_explicit(&(objPtr->refCount), 1, memory_order_release);
+    int res = atomic_fetch_sub_explicit(&(objPtr->refCount), 1, memory_order_release) - 1;
 
     // if < 0, Jim_FreeObj will (appropriately) panic
     if (res <= 0) {
@@ -4031,6 +4032,12 @@ static void JimDecrCmdRefCount(Jim_Interp *interp, Jim_Cmd *cmdPtr)
 {
     if (--cmdPtr->inUse == 0) {
         if (cmdPtr->isproc) {
+            for (int i = 0; i < cmdPtr->u.proc.argListLen; i++) {
+                Jim_Obj* nameObjPtr = cmdPtr->u.proc.arglist[i].nameObjPtr;
+                Jim_Obj* defaultObjPtr = cmdPtr->u.proc.arglist[i].defaultObjPtr;
+                Jim_DecrRefCount(nameObjPtr);
+                if (defaultObjPtr) Jim_DecrRefCount(defaultObjPtr);
+            }
             Jim_DecrRefCount(cmdPtr->u.proc.argListObjPtr);
             Jim_DecrRefCount(cmdPtr->u.proc.bodyObjPtr);
             Jim_DecrRefCount(cmdPtr->u.proc.nsObj);
@@ -4516,9 +4523,9 @@ static Jim_Cmd *JimCreateProcedureCmd(Jim_Interp *interp, Jim_Obj *argListObjPtr
     /* Parse the args out into arglist, validating as we go */
     /* Examine the argument list for default parameters and 'args' */
     for (i = 0; i < argListLen; i++) {
-        Jim_Obj *argPtr;
-        Jim_Obj *nameObjPtr;
-        Jim_Obj *defaultObjPtr;
+        Jim_Obj *argPtr = NULL;
+        Jim_Obj *nameObjPtr = NULL;
+        Jim_Obj *defaultObjPtr = NULL;
         int len;
 
         /* Examine a parameter */
@@ -4562,6 +4569,9 @@ err:
                 cmdPtr->u.proc.reqArity++;
             }
         }
+
+        Jim_IncrRefCount(nameObjPtr);
+        if (defaultObjPtr) Jim_IncrRefCount(defaultObjPtr);
 
         cmdPtr->u.proc.arglist[i].nameObjPtr = nameObjPtr;
         cmdPtr->u.proc.arglist[i].defaultObjPtr = defaultObjPtr;
@@ -5305,10 +5315,7 @@ static Jim_Obj *JimDictExpandArrayVariable(Jim_Interp *interp, Jim_Obj *varObjPt
     }
 
     int isDictShared = Jim_IsShared(dictObjPtr);
-    if (isDictShared) {
-        dictObjPtr = Jim_DuplicateObj(interp, dictObjPtr, JIM_LIVE_LIST);
-        Jim_IncrRefCount(dictObjPtr);
-    }
+    dictObjPtr = Jim_DupIfShared(interp, dictObjPtr, JIM_TEMP_LIST);
 
     ret = Jim_DictKey(interp, dictObjPtr, keyObjPtr, &resObjPtr, JIM_NONE);
     if (ret != JIM_OK) {
@@ -5319,12 +5326,6 @@ static Jim_Obj *JimDictExpandArrayVariable(Jim_Interp *interp, Jim_Obj *varObjPt
     else if ((flags & JIM_UNSHARED) && isDictShared) {
         /* Update the variable to have the new unshared copy */
         Jim_SetVariable(interp, varObjPtr, dictObjPtr);
-    }
-
-    if (isDictShared) {
-        // clean up the duplicated dict if we didn't end up using it
-        // (potentially not passed to Jim_SetVariable)
-        Jim_DecrRefCount(dictObjPtr);
     }
 
     return resObjPtr;
@@ -5364,6 +5365,8 @@ static void DupDictSubstInternalRep(Jim_Interp *interp, Jim_Obj *srcPtr, Jim_Obj
  * Not safe with objects from another interpreter. */
 static void SetDictSubstFromAny(Jim_Interp *interp, Jim_Obj *objPtr)
 {
+    JimPanic((!Jim_SameInterp(interp, objPtr),
+        "object from another interpreter when running SetDictSubstFromAny"));
     if (objPtr->typePtr != &dictSubstObjType) {
         Jim_Obj *varObjPtr, *keyObjPtr;
 
@@ -6731,7 +6734,7 @@ static int SetListFromAnyUnshared(Jim_Interp *interp, struct Jim_Obj *objPtr)
 static Jim_Obj *GetList(Jim_Interp *interp, struct Jim_Obj *objPtr)
 {
     if (objPtr->typePtr != &listObjType) {
-        objPtr = Jim_DupIfShared(interp, objPtr, JIM_TEMP_LIST);
+        objPtr = DupIfSharedAndWrongRep(interp, objPtr, &listObjType, JIM_TEMP_LIST);
         SetListFromAnyUnshared(interp, objPtr);
     }
 
@@ -7668,10 +7671,8 @@ static void UpdateStringOfDict(Jim_Interp *interp, struct Jim_Obj *objPtr)
     JimMakeListStringRep(interp, objPtr, objPtr->internalRep.dictValue->table, objPtr->internalRep.dictValue->len);
 }
 
-static int SetDictFromAnyUnshared(Jim_Interp *interp, struct Jim_Obj *objPtr)
+static int SetDictFromAnyUnguarded(Jim_Interp *interp, struct Jim_Obj *objPtr)
 {
-    JimPanic((Jim_IsShared(objPtr), "SetDictFromAnyUnshared called with shared object"));
-
     int listlen;
 
     if (objPtr->typePtr == &dictObjType) {
@@ -7727,6 +7728,12 @@ static int SetDictFromAnyUnshared(Jim_Interp *interp, struct Jim_Obj *objPtr)
 
         return JIM_OK;
     }
+}
+
+static int SetDictFromAnyUnshared(Jim_Interp *interp, struct Jim_Obj *objPtr)
+{
+    JimPanic((Jim_IsShared(objPtr), "SetDictFromAnyUnshared called with shared object"));
+    SetDictFromAnyUnguarded(interp, objPtr);
 }
 
 /* Dict object API */
