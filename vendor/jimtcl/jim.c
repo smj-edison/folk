@@ -5316,7 +5316,10 @@ static Jim_Obj *JimDictExpandArrayVariable(Jim_Interp *interp, Jim_Obj *varObjPt
     }
 
     int isDictShared = Jim_IsShared(dictObjPtr);
-    dictObjPtr = Jim_DupIfShared(interp, dictObjPtr, JIM_TEMP_LIST);
+    if (isDictShared) {
+        dictObjPtr = Jim_DupIfShared(interp, dictObjPtr, JIM_LIVE_LIST);
+        Jim_IncrRefCount(dictObjPtr);
+    }
 
     ret = Jim_DictKey(interp, dictObjPtr, keyObjPtr, &resObjPtr, JIM_NONE);
     if (ret != JIM_OK) {
@@ -5327,6 +5330,14 @@ static Jim_Obj *JimDictExpandArrayVariable(Jim_Interp *interp, Jim_Obj *varObjPt
     else if ((flags & JIM_UNSHARED) && isDictShared) {
         /* Update the variable to have the new unshared copy */
         Jim_SetVariable(interp, varObjPtr, dictObjPtr);
+    }
+
+    if (isDictShared) {
+        // resObjPtr could be on dictObjPtr, so we need to make sure
+        // it's not freed when dictObjPtr is freed
+        if (resObjPtr) Jim_IncrRefCount(resObjPtr);
+        Jim_DecrRefCount(dictObjPtr);
+        if (resObjPtr) resObjPtr->refCount--;
     }
 
     return resObjPtr;
@@ -7228,16 +7239,15 @@ static int Jim_ListIndices(Jim_Interp *interp, Jim_Obj *listPtr,
                 }
             }
             ret = -1;
-            Jim_FreeIfZeroRef(listPtr);
             goto err;
         }
 
         if (duplicated) {
-            // make sure the child item stays alive (rc++), but then pretend like
-            // it's a new object (rc = 0) without freeing it
+            // make sure the child item stays alive (rc++), but don't trigger free
+            // (rc-- instead of Jim_DecrRefCount)
             Jim_IncrRefCount(objPtr);
             Jim_FreeNewObj(listPtr);
-            objPtr->refCount = 0;
+            objPtr->refCount--;
             listPtr = objPtr;
         } else {
             listPtr = objPtr;
@@ -11487,13 +11497,6 @@ out:
     return retcode;
 }
 
-/* Note: scriptObjPtr may be duplicated every call so it's probably best to duplicate
- * it before this is called */
-int Jim_EvalObjThreadSafe(Jim_Interp *interp, Jim_Obj *scriptObjPtr) {
-    scriptObjPtr = DupIfWrongInterp(interp, scriptObjPtr, JIM_TEMP_LIST);
-    return Jim_EvalObj(interp, scriptObjPtr);
-}
-
 /* Panics if either object is from another interpreter */
 static int JimSetProcArg(Jim_Interp *interp, Jim_Obj *argNameObj, Jim_Obj *argValObj)
 {
@@ -12994,7 +12997,7 @@ static int Jim_IfCoreCommand(Jim_Interp *interp, int argc, Jim_Obj *const *argv)
             if (current >= argc)
                 goto err;
             if (boolean)
-                return Jim_EvalObjThreadSafe(interp, argv[current]);
+                return Jim_EvalObj(interp, argv[current]);
             /* Ok: no else-clause follows */
             if (++current >= argc) {
                 Jim_SetResult(interp, Jim_NewEmptyStringObj(interp));
@@ -13005,7 +13008,7 @@ static int Jim_IfCoreCommand(Jim_Interp *interp, int argc, Jim_Obj *const *argv)
                 /* IIICKS - else-clause isn't last cmd? */
                 if (current != argc - 1)
                     goto err;
-                return Jim_EvalObjThreadSafe(interp, argv[current]);
+                return Jim_EvalObj(interp, argv[current]);
             }
             else if (Jim_CompareStringImmediate(interp, argv[falsebody], "elseif"))
                 /* Ok: elseif follows meaning all the stuff
@@ -13014,7 +13017,7 @@ static int Jim_IfCoreCommand(Jim_Interp *interp, int argc, Jim_Obj *const *argv)
             /* OOPS - else-clause is not last cmd? */
             else if (falsebody != argc - 1)
                 goto err;
-            return Jim_EvalObjThreadSafe(interp, argv[falsebody]);
+            return Jim_EvalObj(interp, argv[falsebody]);
         }
         return JIM_OK;
     }
@@ -13161,7 +13164,7 @@ static int Jim_SwitchCoreCommand(Jim_Interp *interp, int argc, Jim_Obj *const *a
     }
     Jim_SetEmptyResult(interp);
     if (scriptObj) {
-        return Jim_EvalObjThreadSafe(interp, scriptObj);
+        return Jim_EvalObj(interp, scriptObj);
     }
     return JIM_OK;
 }
@@ -13918,7 +13921,7 @@ static int Jim_EvalCoreCommand(Jim_Interp *interp, int argc, Jim_Obj *const *arg
     }
 
     if (argc == 2) {
-        rc = Jim_EvalObjThreadSafe(interp, argv[1]);
+        rc = Jim_EvalObj(interp, argv[1]);
     }
     else {
         rc = Jim_EvalObj(interp, Jim_ConcatObj(interp, argc - 1, argv + 1));
@@ -13958,7 +13961,7 @@ static int Jim_UplevelCoreCommand(Jim_Interp *interp, int argc, Jim_Obj *const *
         /* Eval the code in the target callframe. */
         interp->framePtr = targetCallFrame;
         if (argc == 2) {
-            retcode = Jim_EvalObjThreadSafe(interp, argv[1]);
+            retcode = Jim_EvalObj(interp, argv[1]);
         }
         else {
             retcode = Jim_EvalObj(interp, Jim_ConcatObj(interp, argc - 1, argv + 1));
