@@ -236,34 +236,58 @@ static int RetractFunc(Jim_Interp *interp, int argc, Jim_Obj *const *argv) {
 static void reactToNewStatement(StatementRef ref);
 
 int64_t _Atomic latestVersion = 0; // TODO: split by key?
+// Note: returns an acquired statement that the caller should release.
+Statement* HoldStatementGloballyAcquiring(const char *key, double version,
+                                          Jim_Obj *jimClause, long keepMs, const char *destructorCode,
+                                          const char *sourceFileName, int sourceLineNumber) {
+/* #ifdef TRACY_ENABLE */
+/*     char *s = clauseToString(clause); */
+/*     TracyCMessageFmt("hold: %.200s", s); free(s); */
+/* #endif */
 
-// callers are responsible for freeing key
-void HoldStatementGlobally(const char *key, double version,
-                           Jim_Obj *jimClause, long keepMs, const char *destructorCode,
-                           const char *sourceFileName, int sourceLineNumber) {
-#ifdef TRACY_ENABLE
-    TracyCMessageFmt("hold: %.200s", Jim_String(interp, jimClause));
-#endif
+    StatementRef oldRef; Statement* newStmt;
 
-    StatementRef oldRef; StatementRef newRef;
+    newStmt = dbHoldStatement(db, interp, key, version,
+                              jimClause, keepMs,
+                              sourceFileName, sourceLineNumber,
+                              &oldRef);
 
     Destructor* destructor = NULL;
     if (destructorCode != NULL) {
         destructor = destructorNew(destructorHelper, strdup(destructorCode));
     }
-    newRef = dbHoldStatement(db, interp, key, version,
-                             jimClause, keepMs, destructor,
-                             sourceFileName, sourceLineNumber,
-                             &oldRef);
-    if (!statementRefIsNull(newRef)) {
+
+    if (newStmt != NULL) {
+        if (destructor != NULL) {
+            statementAddDestructor(newStmt, destructor);
+        }
+
+        StatementRef newRef = statementRef(db, newStmt);
         reactToNewStatement(newRef);
+    } else {
+        if (destructor != NULL) {
+            destructorRun(destructor);
+            free(destructor);
+        }
     }
+
     if (!statementRefIsNull(oldRef)) {
         Statement* stmt;
         if ((stmt = statementAcquire(db, oldRef))) {
             statementDecrParentCountAndMaybeRemoveSelf(db, stmt);
             statementRelease(db, stmt);
         }
+    }
+    return newStmt;
+}
+void HoldStatementGlobally(const char *key, double version,
+                           Jim_Obj *jimClause, long keepMs, const char *destructorCode,
+                           const char *sourceFileName, int sourceLineNumber) {
+    Statement* stmt = HoldStatementGloballyAcquiring(key, version,
+                                                     jimClause, keepMs, destructorCode,
+                                                     sourceFileName, sourceLineNumber);
+    if (stmt != NULL) {
+        statementRelease(db, stmt);
     }
 }
 static int HoldStatementGloballyFunc(Jim_Interp *interp, int argc, Jim_Obj *const *argv) {
@@ -290,6 +314,7 @@ static int HoldStatementGloballyFunc(Jim_Interp *interp, int argc, Jim_Obj *cons
     HoldStatementGlobally(key, version,
                           jimClause, keepMs, destructorCode,
                           sourceFileName, sourceLineNumber);
+
     return (JIM_OK);
 }
 
@@ -307,24 +332,34 @@ static StatementRef Say(Jim_Obj* jimClause, long keepMs, const char *destructorC
         free(s);
     }
 
-    StatementRef ref;
+    Statement* stmt;
+    stmt = dbInsertOrReuseStatement(db, interp, jimClause, keepMs,
+                                    sourceFileName, sourceLineNumber,
+                                    parent, NULL);
+
     Destructor* destructor = NULL;
     if (destructorCode != NULL) {
         destructor = destructorNew(destructorHelper, strdup(destructorCode));
     }
-    ref = dbInsertOrReuseStatement(db, interp, jimClause, keepMs, destructor,
-                                   sourceFileName, sourceLineNumber,
-                                   parent, NULL);
 
-    if (statementRefIsNull(ref)) {
+    if (stmt != NULL) {
+        if (destructor != NULL) {
+            statementAddDestructor(stmt, destructor);
+        }
+
+        StatementRef ref = statementRef(db, stmt);
+        statementRelease(db, stmt);
+
+        reactToNewStatement(ref);
+        return ref;
+
+    } else {
         if (destructor != NULL) {
             destructorRun(destructor);
             free(destructor);
         }
-    } else {
-        reactToNewStatement(ref);
+        return STATEMENT_REF_NULL;
     }
-    return ref;
 }
 
 static int SayWithSourceFunc(Jim_Interp *interp, int argc, Jim_Obj *const *argv) {
@@ -867,6 +902,7 @@ static void reactToNewStatement(StatementRef ref) {
     Statement* stmt = statementAcquire(db, ref);
     if (stmt == NULL) { return; }
     Jim_Obj* jimClause = statementJimClause(stmt);
+    assert(jimClause != NULL);
 
     Jim_Obj* firstTerm = Jim_ListGetIndex(interp, jimClause, 0);
     if (firstTerm != NULL && strcmp(Jim_String(interp, firstTerm), "when") == 0) {
@@ -1028,13 +1064,15 @@ void workerRun(WorkQueueItem item) {
     if (item.op == ASSERT) {
         /* printf("Assert (%s)\n", clauseToString(item.assert.clause)); */
 
-        StatementRef ref;
-        ref = dbInsertOrReuseStatement(db, interp, 
-                                       item.assert.clause, 0, NULL,
-                                       item.assert.sourceFileName,
-                                       item.assert.sourceLineNumber,
-                                       MATCH_REF_NULL, NULL);
-        if (!statementRefIsNull(ref)) {
+        Statement* stmt;
+        stmt = dbInsertOrReuseStatement(db, interp, item.assert.clause, 0,
+                                        item.assert.sourceFileName,
+                                        item.assert.sourceLineNumber,
+                                        MATCH_REF_NULL, NULL);
+        if (stmt != NULL) {
+            StatementRef ref = statementRef(db, stmt);
+            statementRelease(db, stmt);
+
             reactToNewStatement(ref);
         }
 

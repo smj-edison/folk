@@ -50,14 +50,19 @@ bool statementCheck(Db* db, StatementRef ref);
 
 StatementRef statementRef(Db* db, Statement* stmt);
 
+// Getters:
 Clause* jimClauseToTrieClause(Jim_Interp* interp, Jim_Obj* obj);
 Jim_Obj* statementJimClause(Statement* stmt);
 Clause* statementTrieClause(Statement* stmt);
+
 char* statementSourceFileName(Statement* stmt);
 int statementSourceLineNumber(Statement* stmt);
 
 bool statementHasOtherIncompleteChildMatch(Db* db, Statement* stmt,
                                            MatchRef otherThan);
+
+void statementAddDestructor(Statement* stmt, Destructor* d);
+void statementInheritDestructors(Statement* stmt, Statement* fromStmt);
 
 void statementIncrParentCount(Statement* stmt);
 void statementDecrParentCountAndMaybeRemoveSelf(Db* db, Statement* stmt);
@@ -97,41 +102,53 @@ typedef struct ResultSet {
 #define SIZEOF_RESULTSET(NRESULTS) (sizeof(ResultSet) + (NRESULTS)*sizeof(Statement*))
 // You're querying a snapshot of whatever statements happened to be in
 // the trie in the moment. The StatementRefs in it may already be
-// invalid by the time dbQuery returns. Caller must free the returned
-// ResultSet*.
+// invalid by the time dbQuery returns.
+//
+// Caller must free the returned ResultSet*.
 ResultSet* dbQuery(Db* db, Clause* pattern);
 
-// Note: once you call this, clause ownership transfers to the DB,
-// which then becomes responsible for freeing it later. Pass a null
-// MatchRef if this is an assertion. Returns a null StatementRef if no
-// new statement was created. 
-StatementRef dbInsertOrReuseStatement(Db* db, Jim_Interp* interp,
-                                      Jim_Obj* jimClause, long keepMs,
-                                      Destructor* destructor,
-                                      const char* sourceFileName, int sourceLineNumber,
-                                      MatchRef parentMatchRef,
-                                      StatementRef* outReusedStatementRef);
+// Note: once you call this, ownership of `clause` transfers to the
+// DB, which then becomes responsible for freeing it later.
+//
+// Pass a null MatchRef for `parent` if this is an assertion.
+//
+// The new Statement is returned acquired and needs to be released by
+// the caller. (This is mainly so that the caller can insert
+// destructors at will before doing the release.) Returns NULL if no
+// new statement was created.
+Statement* dbInsertOrReuseStatement(Db* db, Jim_Interp* interp,
+                                    Jim_Obj* jimClause, long keepMs,
+                                    const char* sourceFileName, int sourceLineNumber,
+                                    MatchRef parentMatchRef,
+                                    StatementRef* outReusedStatementRef);
 
 // Call when you're about to begin a match (i.e., evaluating the body
 // of a When) -- creates the Match object that you'll attach any
 // emitted Statements to. The worker thread is stored with the Match
 // so that the thread can be interrupted if the match is
-// destroyed. The Match is returned acquired and needs to be released
-// by the caller.
+// destroyed.
+// 
+// The new Match is returned acquired and needs to be released by the
+// caller.
 Match* dbInsertMatch(Db* db, int nParents, StatementRef parents[],
                      int workerThreadIndex);
 
 void dbRetractStatements(Db* db, Clause* pattern);
 
-// If version is negative, then this statement will always stomp the
-// previous version. Note: once you call this, clause ownership
-// transfers to the DB, and it is responsible for freeing the clause
-// later.
-StatementRef dbHoldStatement(Db* db, Jim_Interp* interp,
-                             const char* key, double version,
-                             Jim_Obj* jimClause, long keepMs,
-                             Destructor* destructor,
-                             const char* sourceFileName, int sourceLineNumber,
-                             StatementRef* outOldStatement);
+// If `version` is negative, then this statement will always stomp the
+// previous version.
+//
+// Note: once you call this, ownership of `clause` transfers to the
+// DB, which then becomes responsible for freeing it later.
+//
+// The new Statement is returned acquired and needs to be released by
+// the caller. (This is mainly so that the caller can insert
+// destructors at will before doing the release.) Returns NULL if no
+// new statement was created.
+Statement* dbHoldStatement(Db* db, Jim_Interp* interp,
+                           const char* key, double version,
+                           Jim_Obj* jimClause, long keepMs,
+                           const char* sourceFileName, int sourceLineNumber,
+                           StatementRef* outOldStatement);
 
 #endif

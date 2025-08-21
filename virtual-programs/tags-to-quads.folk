@@ -645,9 +645,7 @@ When /tag/ has resolved geometry /geom/ &\
 
 When display /disp/ has width /displayWidth/ height /displayHeight/ &\
      display /disp/ has intrinsics /displayIntrinsics/ &\
-     /tag/ has writable texture /writableTextureId/ with /...wiOptions/ &\
-     writable texture /writableTextureId/ has current texture /wim/ &\
-     /tag/ has quad /quad/ {
+     /tag/ has writable texture /writableTextureId/ with /...wiOptions/ {
 
     # Composite each quad's writable texture onto the screen based on
     # its quad.
@@ -656,13 +654,21 @@ When display /disp/ has width /displayWidth/ height /displayHeight/ &\
         [list 0 [expr {2.0/$displayHeight}] -1] \
         [list 0 0 1]]
 
-    lassign [lmap v [$quadLib vertices [$quadLib change $quad "display $disp"]] {
-        $poseLib project $displayIntrinsics \
-                     $displayWidth $displayHeight $v
-    }] a b c d
+    When $tag has quad /quad/ {
+        lassign [lmap v [$quadLib vertices [$quadLib change $quad "display $disp"]] {
+            $poseLib project $displayIntrinsics \
+                $displayWidth $displayHeight $v
+        }] a b c d
 
-    Wish the GPU draws pipeline "image" with arguments \
-        [list [list $displayWidth $displayHeight] \
-             $displayToClip \
-             $wim $a $b $c $d]
+        HoldStatement! (keep 2ms) [list $tag image] \
+            [list $this wishes the GPU draws pipeline "image" with arguments \
+                 [list [list $displayWidth $displayHeight] \
+                      $displayToClip \
+                      [dict get $wiOptions texture] $a $b $c $d]]
+    }
+
+    On unmatch {
+        HoldStatement! [list $tag image] {}
+    }
+    # TODO: How to prevent a race if the tag returns?
 }

@@ -29,7 +29,7 @@ extern void rewindSysmonInterp();
 
 // How many ms are in each tick? You probably want this to be less
 // than half of 16ms (1 frame).
-#define SYSMON_TICK_MS 4
+#define SYSMON_TICK_MS 3
 
 typedef struct RemoveLater {
     StatementRef _Atomic stmt;
@@ -152,29 +152,50 @@ void sysmon() {
     }
 #endif
 
-    // Fifth: update the clock time statement in the database.
-    // sysmon.c claims the clock time is <TIME>
+    // Fifth: update the time statements in the database.
+
     int64_t timeNs = timestamp_get(CLOCK_REALTIME);
 
     char *timeStr = calloc(100, 1);
-    snprintf(timeStr, 100, "%f",
-             (double)timeNs / 1000000000.0);
+    snprintf(timeStr, 100, "%f", (double)timeNs / 1000000000.0);
 
-    Jim_Obj* clockTimeTerms[] = {
+    Jim_Obj* internalTimeTerms[] = {
         Jim_NewStringObjNoInterp("sysmon.c", -1),
         Jim_NewStringObjNoInterp("claims", -1),
         Jim_NewStringObjNoInterp("the", -1),
-        Jim_NewStringObjNoInterp("clock", -1),
+        Jim_NewStringObjNoInterp("internal", -1),
         Jim_NewStringObjNoInterp("time", -1),
         Jim_NewStringObjNoInterp("is", -1),
         Jim_NewStringObjNoInterp(timeStr, -1),
     };
-    Jim_Obj* clockTimeClause = Jim_NewListObjNoInterp(
-        clockTimeTerms, sizeof(clockTimeTerms)/sizeof(clockTimeTerms[0]));
+    Jim_Obj* internalTimeClause = Jim_NewListObjNoInterp(
+        internalTimeTerms, sizeof(internalTimeTerms)/sizeof(internalTimeTerms[0]));
 
-    HoldStatementGlobally("clock-time", currentTick,
-                          clockTimeClause, 5, NULL,
+    HoldStatementGlobally("internal-time", currentTick,
+                          internalTimeClause, 0, NULL,
                           "sysmon.c", __LINE__);
+
+    // sysmon.c claims the clock time is <TIME>
+    if (currentTick % 3 == 0) {
+        char *timeStr = calloc(100, 1);
+        snprintf(timeStr, 100, "%f", (double)timeNs / 1000000000.0);
+
+        Jim_Obj* clockTimeTerms[] = {
+            Jim_NewStringObjNoInterp("sysmon.c", -1),
+            Jim_NewStringObjNoInterp("claims", -1),
+            Jim_NewStringObjNoInterp("the", -1),
+            Jim_NewStringObjNoInterp("clock", -1),
+            Jim_NewStringObjNoInterp("time", -1),
+            Jim_NewStringObjNoInterp("is", -1),
+            Jim_NewStringObjNoInterp(timeStr, -1),
+        };
+        Jim_Obj* clockTimeClause = Jim_NewListObjNoInterp(
+            clockTimeTerms, sizeof(clockTimeTerms)/sizeof(clockTimeTerms[0]));
+
+        HoldStatementGlobally("clock-time", currentTick,
+                              clockTimeClause, 0, NULL,
+                              "sysmon.c", __LINE__);
+    }
 }
 
 void *sysmonMain(void *ptr) {
