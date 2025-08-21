@@ -382,17 +382,9 @@ extern "C" {
 void Jim_IncrRefCount(Jim_Obj *objPtr);
 void Jim_DecrRefCount(Jim_Obj *objPtr);
 void Jim_FreeIfZeroRef(Jim_Obj *objPtr);
+void Jim_FreeNewObj(Jim_Obj *objPtr);
 int Jim_IsShared(Jim_Obj *objPtr);
 int Jim_SameInterp(struct Jim_Interp *interp, Jim_Obj *objPtr);
-
-/* This macro is used when we allocate a new object using
- * Jim_New...Obj(), but for some error we need to destroy it.
- * Instead to use Jim_IncrRefCount() + Jim_DecrRefCount() we
- * can just call Jim_FreeNewObj. To call Jim_Free directly
- * seems too raw, the object handling may change and we want
- * that Jim_FreeNewObj() can be called only against objects
- * that are believed to have refcount == 0. */
-#define Jim_FreeNewObj Jim_FreeObj
 
 /* Free the internal representation of the object. */
 #define Jim_FreeIntRep(o) \
@@ -552,7 +544,7 @@ typedef struct Jim_PrngState {
 } Jim_PrngState;
 
 /* simple bump allocator for temp objects */
-#define JIM_TEMP_LIST_SIZE (32 * 1024)
+#define JIM_TEMP_LIST_SIZE (128 * 1024)
 typedef struct Jim_TempList {
     size_t length;
     Jim_Obj objects[JIM_TEMP_LIST_SIZE];
@@ -763,7 +755,7 @@ JIM_EXPORT Jim_HashEntry * Jim_NextHashEntry
 /* objects */
 JIM_EXPORT Jim_Obj * Jim_NewObj (Jim_Interp *interp, int onTempList);
 JIM_EXPORT Jim_Obj * Jim_NewObjNoInterp ();
-JIM_EXPORT void Jim_FreeObj (Jim_Obj *objPtr);
+JIM_EXPORT void Jim_FreeObj (Jim_Obj *objPtr, int latestRefCount);
 JIM_EXPORT void Jim_InvalidateStringRep (Jim_Obj *objPtr);
 JIM_EXPORT Jim_Obj * Jim_DuplicateObj (Jim_Interp *interp,
         Jim_Obj *objPtr, int flags);

@@ -48,10 +48,10 @@ $cc proc Recollect! {Jim_Obj* patternObj} void {
 
     Jim_Obj* collectorsObj = QuerySimple(collectorClause);
     if (Jim_ListLength(interp, collectorsObj) == 0) {
-        Clause* emptyClause = malloc(SIZEOF_CLAUSE(0));
-        emptyClause->nTerms = 0;
-        HoldStatementGlobally(makeCollectKey(interp, patternObj), version++,
+        const char* key = makeCollectKey(interp, patternObj);
+        HoldStatementGlobally(key, version++,
                               Jim_NewEmptyStringObj(interp), 0, NULL, NULL, 0);
+        free(key);
     } else {
         Jim_Obj* matchesObj = QuerySimple(patternObj);
         Jim_Obj* claimizedPattern = claimizeClause(patternObj);
@@ -72,12 +72,13 @@ $cc proc Recollect! {Jim_Obj* patternObj} void {
             Jim_NewStringObjNoInterp("are", -1),
             matchesObj,
         };
-        Jim_Obj* collectedClause = Jim_NewListObjNoInterp(
-            collectedTerms, sizeof(collectedTerms)/sizeof(collectedTerms[0])
+        Jim_Obj* collectedClause = Jim_NewListObj(
+            interp, collectedTerms, sizeof(collectedTerms)/sizeof(collectedTerms[0])
         );
-
-        HoldStatementGlobally(makeCollectKey(interp, patternObj), version++,
+        const char* key = makeCollectKey(interp, patternObj);
+        HoldStatementGlobally(key, version++,
                               collectedClause, 0, NULL, NULL, 0);
+        free(key);
     }
 
     Jim_FreeNewObj(collectorsObj);

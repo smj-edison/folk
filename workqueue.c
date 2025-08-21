@@ -90,6 +90,7 @@ static void workQueueResize(WorkQueue* q) {
                               memory_order_relaxed);
     }
     atomic_store_explicit(&q->array, new_a, memory_order_release);
+    free(a);
     /* printf("resize\n"); */
 }
 

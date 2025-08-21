@@ -236,6 +236,8 @@ static int RetractFunc(Jim_Interp *interp, int argc, Jim_Obj *const *argv) {
 static void reactToNewStatement(StatementRef ref);
 
 int64_t _Atomic latestVersion = 0; // TODO: split by key?
+
+// callers are responsible for freeing key
 void HoldStatementGlobally(const char *key, double version,
                            Jim_Obj *jimClause, long keepMs, const char *destructorCode,
                            const char *sourceFileName, int sourceLineNumber) {
@@ -404,11 +406,11 @@ Jim_Obj* QuerySimple(Jim_Obj* pattern) {
             envDict[(j+1)*2] = Jim_NewStringObj(interp, env->bindings[j].name, -1);
             envDict[(j+1)*2+1] = env->bindings[j].value;
         }
-        statementRelease(db, result);
 
         Jim_Obj *resultObj = Jim_NewDictObj(interp, envDict, (env->nBindings + 1) * 2);
         Jim_ListAppendElement(interp, ret, resultObj);
 
+        statementRelease(db, result);
         free(env);
     }
 

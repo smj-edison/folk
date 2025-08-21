@@ -2258,12 +2258,11 @@ Jim_Obj *Jim_NewObjNoInterp()
 /* Free an object. Actually objects are never freed, but
  * just moved to the free objects list, where they will be
  * reused by Jim_NewObj(). */
-void Jim_FreeObj(Jim_Obj *objPtr)
+void Jim_FreeObj(Jim_Obj *objPtr, int latestRefCount)
 {
     /* Check if the object was already freed, panic. */
-    int refCount = atomic_load_explicit(&(objPtr->refCount), memory_order_relaxed);
-    JimPanic((refCount != 0, "!!!Object %p freed with bad refcount %d, type=%s", objPtr,
-        refCount, objPtr->typePtr ? objPtr->typePtr->name : "<none>"));
+    JimPanic((latestRefCount != 0, "!!!Object %p freed with bad refcount %d, type=%s", objPtr,
+        latestRefCount, objPtr->typePtr ? objPtr->typePtr->name : "<none>"));
 
     /* Free the internal representation */
     Jim_FreeIntRep(objPtr);
@@ -2476,8 +2475,20 @@ inline void Jim_DecrRefCount(Jim_Obj *objPtr) {
 
     // if < 0, Jim_FreeObj will (appropriately) panic
     if (res <= 0) {
-        Jim_FreeObj(objPtr);
+        Jim_FreeObj(objPtr, res);
     }
+}
+
+/* This function is used when we allocate a new object using
+ * Jim_New...Obj(), but for some error we need to destroy it.
+ * Instead to use Jim_IncrRefCount() + Jim_DecrRefCount() we
+ * can just call Jim_FreeNewObj. To call Jim_Free directly
+ * seems too raw, the object handling may change and we want
+ * that Jim_FreeNewObj() can be called only against objects
+ * that are believed to have refcount == 0. */
+inline void Jim_FreeNewObj(Jim_Obj *objPtr) {
+    int refCount = atomic_load_explicit(&(objPtr->refCount), memory_order_relaxed);
+    Jim_FreeObj(objPtr, refCount);
 }
 
 inline void Jim_FreeIfZeroRef(Jim_Obj *objPtr) {

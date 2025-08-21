@@ -4,13 +4,13 @@ set trieLib [apply {{} {
     $cc include <stdlib.h>
     $cc include <string.h>
     $cc include "trie.h"
+    $cc include "db.h"
     $cc code {
         typedef struct Db Db;
         extern Db* db;
 
         extern void dbLockClauseToStatementRef(Db* db);
         extern void dbUnlockClauseToStatementRef(Db* db);
-        extern const Trie* dbGetClauseToStatementRef(Db* db);
 
 #if __has_include ("tracy/TracyC.h")
 #include "tracy/TracyC.h"
