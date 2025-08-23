@@ -67,6 +67,8 @@ namespace eval ::sha2 {
             Tcl_IncrRefCount(temp);
             
             str = Tcl_GetStringFromObj(temp, &obj->length);
+            // FIXME: this should use Jim_SetBytesOrFree during port
+            // from Tcl_Obj to Jim_Obj
             obj->bytes = Tcl_Alloc(obj->length + 1);
             memcpy(obj->bytes, str, obj->length + 1);
             

@@ -295,15 +295,21 @@ struct Jim_Interp;
 }
 #endif
 
+
 typedef struct Jim_Obj {
-    char *bytes; /* string representation buffer. NULL = no string repr. */
+#ifdef __cplusplus
+    std::atomic<char *> bytes;
+#else
+    char * _Atomic bytes; /* string representation buffer. NULL = no string repr. */
+#endif
     const struct Jim_ObjType *typePtr; /* object type. */
 #ifdef __cplusplus
     std::atomic<int> refCount;
+    std::atomic<int> length;
 #else
-    atomic_int refCount; /* reference count */
+    _Atomic int refCount; /* reference count */
+    _Atomic int length; /* number of bytes in 'bytes', not including the null term. */
 #endif
-    int length; /* number of bytes in 'bytes', not including the null term. */
     unsigned long long interpId; /* parent interpreter */
     /* Internal representation union */
     union {
@@ -763,13 +769,11 @@ JIM_EXPORT Jim_Obj * DupIfSharedAndWrongRep(Jim_Interp *interp, Jim_Obj *objPtr,
         const Jim_ObjType *typePtr, int flags);
 JIM_EXPORT Jim_Obj * DupIfWrongInterp(Jim_Interp *interp, Jim_Obj *objPtr, int flags);
 JIM_EXPORT Jim_Obj * Jim_DupIfShared(Jim_Interp *interp, Jim_Obj *objPtr, int flags);
+JIM_EXPORT void Jim_SetBytesOrFree(Jim_Obj *objPtr, char *bytes, size_t len);
 JIM_EXPORT const char * Jim_GetString(Jim_Interp *interp, Jim_Obj *objPtr,
-        int *lenPtr);
-JIM_EXPORT const char * Jim_GetStringUnshared(Jim_Interp *interp, Jim_Obj *objPtr,
         int *lenPtr);
 JIM_EXPORT const char *Jim_String(Jim_Interp *interp, Jim_Obj *objPtr);
 JIM_EXPORT int Jim_Length(Jim_Interp *interp, Jim_Obj *objPtr);
-JIM_EXPORT int Jim_LengthUnshared(Jim_Interp *interp, Jim_Obj *objPtr);
 
 /* string object */
 JIM_EXPORT Jim_Obj * Jim_NewStringObj (Jim_Interp *interp,

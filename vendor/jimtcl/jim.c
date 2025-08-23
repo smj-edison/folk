@@ -2288,7 +2288,10 @@ void Jim_InvalidateStringRep(Jim_Obj *objPtr)
     objPtr->bytes = NULL;
 }
 
-static int SetStringFromAnyUnshared(Jim_Interp *interp, struct Jim_Obj *objPtr);
+static const Jim_ObjType variableObjType;
+static const Jim_ObjType dictSubstObjType;
+static const Jim_ObjType interpolatedObjType;
+static const Jim_ObjType commandObjType;
 
 /* Duplicate an object. The returned object has refcount = 0. */
 Jim_Obj *Jim_DuplicateObj(Jim_Interp *interp, Jim_Obj *objPtr, int flags)
@@ -2318,20 +2321,23 @@ Jim_Obj *Jim_DuplicateObj(Jim_Interp *interp, Jim_Obj *objPtr, int flags)
 
     /* By default, the new object has the same type as the old object */
     dupPtr->typePtr = objPtr->typePtr;
-    if (objPtr->typePtr != NULL) {
+    if (!Jim_SameInterp(interp, objPtr) && 
+            (objPtr->typePtr == &variableObjType ||
+             objPtr->typePtr == &dictSubstObjType ||
+             objPtr->typePtr == &interpolatedObjType ||
+             objPtr->typePtr == &commandObjType)) {
+        // cannot duplicate the these types across interpreters
+        assert(dupPtr->bytes != NULL);
+        dupPtr->typePtr = NULL;
+    } else if (objPtr->typePtr != NULL) {
         if (objPtr->typePtr->dupIntRepProc == NULL) {
             dupPtr->internalRep = objPtr->internalRep;
-        }
-        else {
+        } else {
             /* The dup proc may set a different type, e.g. NULL */
             objPtr->typePtr->dupIntRepProc(interp, objPtr, dupPtr);
         }
     }
 
-    if ((flags & JIM_FORCE_STRING) != 0) {
-        SetStringFromAnyUnshared(interp, dupPtr);
-    }
-    
     return dupPtr;
 }
 
@@ -2340,8 +2346,7 @@ Jim_Obj *Jim_DuplicateObj(Jim_Interp *interp, Jim_Obj *objPtr, int flags)
  * If duplicated onto the temp list, it will set the refCount to 1
  * 
  * FLAGS:
- * JIM_TEMP_LIST: put it on the temp list to be cleared later
- * JIM_FORCE_STRING: when duplicating it, convert it to its string representation */
+ * JIM_TEMP_LIST: put it on the temp list to be cleared later */
 Jim_Obj *Jim_DupIfShared(Jim_Interp *interp, Jim_Obj *objPtr, int flags) {
     if (Jim_IsShared(objPtr)) {
         objPtr = Jim_DuplicateObj(interp, objPtr, flags);
@@ -2361,8 +2366,6 @@ Jim_Obj *DupIfSharedAndWrongRep(Jim_Interp *interp, Jim_Obj *objPtr, const Jim_O
 /* Note: after duplicating, this will force shimmer to string
  * (this is to make sure thread local references are discarded) */
 Jim_Obj *DupIfWrongInterp(Jim_Interp *interp, Jim_Obj *objPtr, int flags) {
-    flags |= JIM_FORCE_STRING;
-
     if (!Jim_SameInterp(interp, objPtr)) {
         objPtr = Jim_DuplicateObj(interp, objPtr, flags);
 
@@ -2376,50 +2379,36 @@ Jim_Obj *DupIfWrongInterp(Jim_Interp *interp, Jim_Obj *objPtr, int flags) {
     return objPtr;
 }
 
+/* Attempts to set the objects' bytes to `bytes`. Frees
+ * if the atomic operation fails. */
+void Jim_SetBytesOrFree(Jim_Obj *objPtr, char *bytes, size_t len)
+{
+    // No ABA problem here, as bytes will only become NULL if
+    // the object was freed. It won't be freed, as we're using it
+    // (barring any bugs with refcounting)
+    char *expected = NULL;
+    // length should be deterministic so can be set twice
+    objPtr->length = len;
+    if (!atomic_compare_exchange_weak(&objPtr->bytes, &expected, bytes)) {
+        free(bytes);
+    }
+}
+
 /* Return the string representation for objPtr. If the object's
  * string representation is invalid, calls the updateStringProc method to create
  * a new one from the internal representation of the object. If the object is
  * shared, it'll duplicate the object onto temp list and call updateStringProc.
  */
-const char *Jim_GetString(Jim_Interp *interp, Jim_Obj *objPtr, int *lenPtr)
+const const char *Jim_GetString(Jim_Interp *interp, Jim_Obj *objPtr, int *lenPtr)
 {
     if (objPtr->bytes == NULL) {
         /* Invalid string repr. Generate it. */
         JimPanic((objPtr->typePtr->updateStringProc == NULL, "UpdateStringProc called against '%s' type.", objPtr->typePtr->name));
-
-        objPtr = Jim_DupIfShared(interp, objPtr, JIM_TEMP_LIST);
-
         objPtr->typePtr->updateStringProc(interp, objPtr);
     }
     if (lenPtr)
         *lenPtr = objPtr->length;
     return objPtr->bytes;
-}
-
-static const char *JimGetStringUnguarded(Jim_Interp *interp, Jim_Obj *objPtr, int *lenPtr)
-{
-    if (objPtr->bytes == NULL) {
-        /* Invalid string repr. Generate it. */
-        JimPanic((objPtr->typePtr->updateStringProc == NULL, "UpdateStringProc called against '%s' type.", objPtr->typePtr->name));
-
-        objPtr->typePtr->updateStringProc(interp, objPtr);
-    }
-    if (lenPtr)
-        *lenPtr = objPtr->length;
-    return objPtr->bytes;
-}
-
-const char *Jim_GetStringUnshared(Jim_Interp *interp, Jim_Obj *objPtr, int *lenPtr)
-{
-    JimPanic((Jim_IsShared(objPtr), "Jim_GetStringUnshared called with shared object"));
-    return JimGetStringUnguarded(interp, objPtr, lenPtr);
-}
-
-const char *Jim_GetStringSameInterp(Jim_Interp *interp, Jim_Obj *objPtr, int *lenPtr)
-{
-    JimPanic((!Jim_SameInterp(interp, objPtr),
-        "object from another interpreter when running Jim_GetStringSameInterp"));
-    return JimGetStringUnguarded(interp, objPtr, lenPtr);
 }
 
 /* Just returns the length (in bytes) of the object's string rep. Will not shimmer if shared */
@@ -2429,18 +2418,6 @@ int Jim_Length(Jim_Interp *interp, Jim_Obj *objPtr)
 
     if (objPtr->bytes == NULL) {
         Jim_GetString(interp, objPtr, &lenPtr);
-        return lenPtr;
-    } else {
-        return objPtr->length;
-    }
-}
-
-int Jim_LengthUnshared(Jim_Interp *interp, Jim_Obj *objPtr)
-{
-    int lenPtr = 0;
-
-    if (objPtr->bytes == NULL) {
-        Jim_GetStringUnshared(interp, objPtr, &lenPtr);
         return lenPtr;
     } else {
         return objPtr->length;
@@ -2457,11 +2434,9 @@ const char *Jim_String(Jim_Interp *interp, Jim_Obj *objPtr)
     }
 }
 
-/* Currently never called with shared object */
 static void JimSetStringBytes(Jim_Obj *objPtr, const char *str)
 {
-    objPtr->bytes = Jim_StrDup(str);
-    objPtr->length = strlen(str);
+    Jim_SetBytesOrFree(objPtr, Jim_StrDup(str), strlen(str));
 }
 
 /* these used to be macros, but it's annoying to import
@@ -3926,7 +3901,7 @@ static void JimSetScriptFromAny(Jim_Interp *interp, struct Jim_Obj *objPtr)
      * (otherwise string rep will be null and script rep
      * will be null after `DupScriptInternalRep` is called on it.
      * Both can't be simultainously null without *exciting* stuff happening) */
-    const char *scriptText = Jim_GetStringSameInterp(interp, objPtr, &scriptTextLen);
+    const char *scriptText = Jim_GetString(interp, objPtr, &scriptTextLen);
     struct JimParserCtx parser;
     struct ScriptObj *script;
     ParseTokenList tokenlist;
@@ -4707,7 +4682,7 @@ Jim_Cmd *Jim_GetCommand(Jim_Interp *interp, Jim_Obj *objPtr, int flags)
     objPtr = DupIfWrongInterp(interp, objPtr, JIM_TEMP_LIST);
 
     /* make sure objPtr has a string representation */
-    Jim_GetStringSameInterp(interp, objPtr, NULL);
+    Jim_GetString(interp, objPtr, NULL);
 
     /* In order to be valid, the proc epoch must match and
      * the lookup must have occurred in the same namespace.
@@ -4806,7 +4781,7 @@ static int SetVariableFromAny(Jim_Interp *interp, struct Jim_Obj *objPtr)
         return JIM_DICT_SUGAR;
     }
 
-    varName = Jim_GetStringSameInterp(interp, objPtr, &len);
+    varName = Jim_GetString(interp, objPtr, &len);
 
     /* Make sure it's not syntax glue to get/set dict. */
     if (len && varName[len - 1] == ')' && strchr(varName, '(') != NULL) {
@@ -4890,7 +4865,7 @@ static Jim_VarVal *JimCreateVariable(Jim_Interp *interp, Jim_Obj *nameObjPtr, Ji
     vv->linkFramePtr = NULL;
     vv->refCount = 0;
 
-    name = Jim_GetStringSameInterp(interp, nameObjPtr, &len);
+    name = Jim_GetString(interp, nameObjPtr, &len);
     if (name[0] == ':' && name[1] == ':') {
         while (*name == ':') {
             name++;
@@ -5251,7 +5226,7 @@ static void JimDictSugarParseVarKey(Jim_Interp *interp, Jim_Obj *objPtr,
     int len, keyLen;
     Jim_Obj *varObjPtr, *keyObjPtr;
 
-    str = Jim_GetStringSameInterp(interp, objPtr, &len);
+    str = Jim_GetString(interp, objPtr, &len);
 
     p = strchr(str, '(');
     JimPanic((p == NULL, "JimDictSugarParseVarKey() called for non-dict-sugar (%s)", str));
@@ -6633,7 +6608,7 @@ static void JimMakeListStringRep(Jim_Interp *interp, Jim_Obj *objPtr, Jim_Obj **
     bufLen++;
 
     /* Generate the string rep. */
-    p = objPtr->bytes = Jim_Alloc(bufLen + 1);
+    char *strHead = p = Jim_Alloc(bufLen + 1);
     realLength = 0;
     for (i = 0; i < objc; i++) {
         int len, qlen;
@@ -6670,7 +6645,7 @@ static void JimMakeListStringRep(Jim_Interp *interp, Jim_Obj *objPtr, Jim_Obj **
         }
     }
     *p = '\0';                  /* nul term. */
-    objPtr->length = realLength;
+    Jim_SetBytesOrFree(objPtr, strHead, realLength);
 
     if (quotingType != staticQuoting) {
         Jim_Free(quotingType);
@@ -7236,6 +7211,9 @@ static int Jim_ListIndices(Jim_Interp *interp, Jim_Obj *listPtr,
     for (i = 0; i < indexc; i++) {
         int duplicated = Jim_IsShared(listPtr) && listPtr->typePtr != &listObjType;
         if (duplicated) {
+            /* through several calls, listPtr may end up being passed into SetListFromAnyUnshared
+             * which tracks listPtr as a source (Jim_SetSourceInfo), so we can't put it on the
+             * temp list */
             listPtr = Jim_DuplicateObj(interp, listPtr, JIM_LIVE_LIST);
         }
 
@@ -7244,12 +7222,14 @@ static int Jim_ListIndices(Jim_Interp *interp, Jim_Obj *listPtr,
             if (flags & JIM_ERRMSG) {
                 if (idxes[i] < 0 || idxes[i] > Jim_ListLength(interp, listPtr)) {
                     Jim_SetResultFormatted(interp, "index \"%#s\" out of range", indexv[i]);
+                    Jim_FreeIfZeroRef(listPtr);
                 }
                 else {
                     Jim_SetResultFormatted(interp, "element %#s missing from sublist \"%#s\"", indexv[i], listPtr);
                 }
             }
             ret = -1;
+            *resultObj = NULL;
             goto err;
         }
 
@@ -7268,10 +7248,6 @@ static int Jim_ListIndices(Jim_Interp *interp, Jim_Obj *listPtr,
 err:
     if (idxes != static_idxes)
         Jim_Free(idxes);
-
-    /* through several calls, listPtr may end up being passed into SetListFromAnyUnshared
-     * which tracks listPtr as a source (Jim_SetSourceInfo), so we can't put it on the
-     * temp list */
 
     return ret;
 }
@@ -7765,7 +7741,7 @@ static int SetDictFromAnyUnguarded(Jim_Interp *interp, struct Jim_Obj *objPtr)
 static int SetDictFromAnyUnshared(Jim_Interp *interp, struct Jim_Obj *objPtr)
 {
     JimPanic((Jim_IsShared(objPtr), "SetDictFromAnyUnshared called with shared object"));
-    SetDictFromAnyUnguarded(interp, objPtr);
+    return SetDictFromAnyUnguarded(interp, objPtr);
 }
 
 /* Dict object API */
@@ -8944,6 +8920,10 @@ static int JimExprOpStrBin(Jim_Interp *interp, struct JimExprNode *node)
 
 static int ExprBool(Jim_Interp *interp, Jim_Obj *obj)
 {
+    // the temp list can quickly become filled when converting "true"s and
+    // "false"es to numbers, so we'll rewind at the end
+    int tempListLen = Jim_GetTempListLen(interp);
+
     long l;
     double d;
     int b;
@@ -8963,6 +8943,8 @@ static int ExprBool(Jim_Interp *interp, Jim_Obj *obj)
     }
 
     Jim_DecrRefCount(obj);
+    Jim_RewindTempListTo(interp, tempListLen);
+
     return ret;
 }
 
@@ -9792,7 +9774,7 @@ static int SetExprFromAny(Jim_Interp *interp, struct Jim_Obj *objPtr)
     fileNameObj = Jim_GetSourceInfo(interp, objPtr, &line);
     Jim_IncrRefCount(fileNameObj);
 
-    exprText = Jim_GetStringSameInterp(interp, objPtr, &exprTextLen);
+    exprText = Jim_GetString(interp, objPtr, &exprTextLen);
 
     /* Initially tokenise the expression into tokenlist */
     ScriptTokenListInit(&tokenlist);
@@ -11199,9 +11181,8 @@ static Jim_Obj *JimInterpolateTokens(Jim_Interp *interp, const ScriptToken * tok
         Jim_SetSourceInfo(interp, objPtr, fileNameObj, line);
     }
 
+    char *strHead = s = Jim_Alloc(totlen + 1);
 
-    s = objPtr->bytes = Jim_Alloc(totlen + 1);
-    objPtr->length = totlen;
     for (i = 0; i < tokens; i++) {
         if (intv[i]) {
             int strLen;
@@ -11211,7 +11192,9 @@ static Jim_Obj *JimInterpolateTokens(Jim_Interp *interp, const ScriptToken * tok
             Jim_DecrRefCount(intv[i]);
         }
     }
-    objPtr->bytes[totlen] = '\0';
+    strHead[totlen] = '\0';
+    Jim_SetBytesOrFree(objPtr, strHead, totlen);
+
     /* Free the intv vector if not static. */
     if (intv != sintv) {
         Jim_Free(intv);
@@ -11922,7 +11905,7 @@ static int SetSubstFromAny(Jim_Interp *interp, struct Jim_Obj *objPtr, int flags
         "object from another interpreter when running SetSubstFromAny"));
 
     int scriptTextLen;
-    const char *scriptText = Jim_GetStringSameInterp(interp, objPtr, &scriptTextLen);
+    const char *scriptText = Jim_GetString(interp, objPtr, &scriptTextLen);
     struct JimParserCtx parser;
     struct ScriptObj *script = Jim_Alloc(sizeof(*script));
     ParseTokenList tokenlist;
