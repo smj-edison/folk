@@ -74,6 +74,7 @@ class C {
         #include <stdbool.h>
         #include <stdio.h>
         #include <setjmp.h>
+        #include <assert.h>
 
         extern __thread jmp_buf __onError;
         extern __thread Jim_Interp* interp;
@@ -144,8 +145,9 @@ class C {
                         if (sscanf(Jim_String(interp, $obj), "($argtype) 0x%p", &$argname) != 1) {
                             // No? Then try to coerce to a Tcl object.
 #if $[dict exists $objtypes $basetype]
-                                __ENSURE_OK($[set basetype]_setFromAnyProc(interp, $obj));
-                                $argname = $obj->internalRep.ptrIntValue.ptr;
+                                __tmpObj = DupIfSharedAndWrongRep(interp, $obj, $[set basetype]_ObjType, JIM_TEMP_LIST);
+                                __ENSURE_OK($[set basetype]_setFromAnyProcUnshared(interp, __tmpObj));
+                                $argname = __tmpObj->internalRep.ptrIntValue.ptr;
 #else
                                 FOLK_ERROR("Unable to convert $[set basetype]");
 #endif
@@ -374,6 +376,7 @@ C method struct {type fields} {
     }
 
     $self include <string.h>
+    $self include <stdatomic.h>
     # ptrAndLongRep.value = 1 means the data is owned by
     # the Jim_ObjType and should be freed by this
     # code. value = 0 means the data is owned externally
@@ -382,7 +385,7 @@ C method struct {type fields} {
         $[join [lmap fieldname $fieldnames { subst {
             __thread Jim_Obj* k__${type}__${fieldname} = NULL;
         } }] "\n"]
-        Jim_ObjType* $[set type]_ObjType;
+        Jim_ObjType* _Atomic $[set type]_ObjType = NULL;
 
         void $[set type]_freeIntRepProc(Jim_Obj *objPtr) {
             if (objPtr->internalRep.ptrIntValue.int1 == 1) {
@@ -406,17 +409,22 @@ C method struct {type fields} {
                     $[$self ret $fieldtype robj_$fieldname robj->$fieldname]
                 }
             }] "\n"]
-            objPtr->length = snprintf(NULL, 0, format, $[join [lmap fieldname $fieldnames {expr {"Jim_String(interp, robj_$fieldname)"}}] ", "]);
-            objPtr->bytes = (char *) Jim_Alloc(objPtr->length + 1);
-            snprintf(objPtr->bytes, objPtr->length + 1, format, $[join [lmap fieldname $fieldnames {expr {"Jim_String(interp, robj_$fieldname)"}}] ", "]);
+            int byteLen = snprintf(NULL, 0, format, $[join [lmap fieldname $fieldnames {expr {"Jim_String(interp, robj_$fieldname)"}}] ", "]);
+            char *bytes = (char *) Jim_Alloc(byteLen + 1);
+            snprintf(bytes, byteLen + 1, format, $[join [lmap fieldname $fieldnames {expr {"Jim_String(interp, robj_$fieldname)"}}] ", "]);
+            Jim_SetBytesOrFree(objPtr, bytes, byteLen);
             $[join [lmap {fieldtype fieldname} $fields {
                 csubst {
                     Jim_FreeNewObj(robj_$fieldname);
                 }
             }] "\n"]
         }
-        int $[set type]_setFromAnyProc(Jim_Interp *interp, Jim_Obj *objPtr) {
+        int $[set type]_setFromAnyProcUnshared(Jim_Interp *interp, Jim_Obj *objPtr) {
             if (objPtr->typePtr == $[set type]_ObjType) { return JIM_OK; }
+            assert(!Jim_IsShared(objPtr));
+
+            Jim_Obj* __tmpObj;
+            ((void) __tmpObj);
 
             $[set type] *robj = ($[set type] *)malloc(sizeof($[set type]));
             $[join [lmap {fieldtype fieldname} $fields {
@@ -441,29 +449,35 @@ C method struct {type fields} {
         }
 
         void $[set type]_init(Jim_Interp* interp, const char* cid) {
-            $[set type]_ObjType = malloc(sizeof(Jim_ObjType));
-            *$[set type]_ObjType = (Jim_ObjType) {
+            Jim_ObjType* $[set type]_ObjTypeAttempt = malloc(sizeof(Jim_ObjType));
+            *$[set type]_ObjTypeAttempt = (Jim_ObjType) {
                 .name = "$type",
                 .freeIntRepProc = $[set type]_freeIntRepProc,
                 .dupIntRepProc = $[set type]_dupIntRepProc,
                 .updateStringProc = $[set type]_updateStringProc
-                // .setFromAnyProc = $[set type]_setFromAnyProc
+                // .setFromAnyProc = $[set type]_setFromAnyProcUnshared
             };
+
+            Jim_ObjType* expected = NULL;
+            if (!atomic_compare_exchange_weak(&$[set type]_ObjType, &expected, $[set type]_ObjTypeAttempt)) {
+                free($[set type]_ObjTypeAttempt);
+            }
 
             char script[1000];
             snprintf(script, 1000,
-                     "dict set {::<C:%s> __addrs} $[set type]_setFromAnyProc %p\n"
+                     "dict set {::<C:%s> __addrs} $[set type]_setFromAnyProcUnshared %p\n"
                      "dict set {::<C:%s> __addrs} $[set type]_ObjType %p",
-                     cid, &$[set type]_setFromAnyProc,
+                     cid, &$[set type]_setFromAnyProcUnshared,
                      cid, $[set type]_ObjType);
             Jim_Eval(interp, script);
         }
     }]
 
     $self argtype $type [csubst {
-        __ENSURE_OK($[set type]_setFromAnyProc(interp, \$obj));
+        __tmpObj = DupIfSharedAndWrongRep(interp, \$obj, $[set type]_ObjType, JIM_TEMP_LIST);
+        __ENSURE_OK($[set type]_setFromAnyProcUnshared(interp, __tmpObj));
         \$argtype \$argname;
-        \$argname = *(($type *)\$obj->internalRep.ptrIntValue.ptr);
+        \$argname = *(($type *)__tmpObj->internalRep.ptrIntValue.ptr);
     }]
 
     $self rtype $type {
@@ -484,13 +498,15 @@ C method struct {type fields} {
                 [regexp {(^[^\[]+)(?:\[(\d*)\]|\*)(?:\[(\d+)\])?$} $fieldtype -> basefieldtype arraylen arraylen2]} {
                 if {$basefieldtype eq "char"} {
                     $self proc ${type}_$fieldname {Jim_Interp* interp Jim_Obj* obj} char* {
-                        __ENSURE_OK($[set type]_setFromAnyProc(interp, obj));
+                        obj = DupIfSharedAndWrongRep(interp, obj, $[set type]_ObjType, JIM_TEMP_LIST);
+                        __ENSURE_OK($[set type]_setFromAnyProcUnshared(interp, obj));
                         return (($type *)obj->internalRep.ptrIntValue.ptr)->$fieldname;
                     }
                 } else {
                     if {$arraylen2 eq ""} {
                         $self proc ${type}_${fieldname}_ptr {Jim_Interp* interp Jim_Obj* obj} $basefieldtype* {
-                            __ENSURE_OK($[set type]_setFromAnyProc(interp, obj));
+                            obj = DupIfSharedAndWrongRep(interp, obj, $[set type]_ObjType, JIM_TEMP_LIST);
+                            __ENSURE_OK($[set type]_setFromAnyProcUnshared(interp, obj));
                             return (($type *)obj->internalRep.ptrIntValue.ptr)->$fieldname;
                         }
                         set elementtype $basefieldtype
@@ -500,13 +516,15 @@ C method struct {type fields} {
                     # If fieldtype is a pointer or an array,
                     # then make a getter that takes an index.
                     $self proc ${type}_$fieldname {Jim_Interp* interp Jim_Obj* obj int idx} $elementtype {
-                        __ENSURE_OK($[set type]_setFromAnyProc(interp, obj));
+                        obj = DupIfSharedAndWrongRep(interp, obj, $[set type]_ObjType, JIM_TEMP_LIST);
+                        __ENSURE_OK($[set type]_setFromAnyProcUnshared(interp, obj));
                         return (($type *)obj->internalRep.ptrIntValue.ptr)->$fieldname[idx];
                     }
                 }
             } else {
                 $self proc ${type}_$fieldname {Jim_Interp* interp Jim_Obj* obj} $fieldtype {
-                    __ENSURE_OK($[set type]_setFromAnyProc(interp, obj));
+                    obj = DupIfSharedAndWrongRep(interp, obj, $[set type]_ObjType, JIM_TEMP_LIST);
+                    __ENSURE_OK($[set type]_setFromAnyProcUnshared(interp, obj));
                     return (($type *)obj->internalRep.ptrIntValue.ptr)->$fieldname;
                 }
             }
@@ -572,6 +590,8 @@ C method proc {name arguments rtype body} {
             }
             int __r = setjmp(__onError);
             if (__r != 0) { return JIM_ERR; }
+            Jim_Obj *__tmpObj;
+            ((void) __tmpObj); // don't warn if unused
 
             [join $loadargs "\n"]
             $saverv
@@ -770,9 +790,9 @@ C method extend {args} {
     set argtypes [dict merge [dict get $srcinfo argtypes] $argtypes]
     set rtypes [dict merge [dict get $srcinfo rtypes] $rtypes]
     dict for {objtype _} [dict get $srcinfo objtypes] {
-        $self code "int (*${objtype}_setFromAnyProc)(Jim_Interp *interp, Jim_Obj *objPtr) = \
+        $self code "int (*${objtype}_setFromAnyProcUnshared)(Jim_Interp *interp, Jim_Obj *objPtr) = \
 (int (*)(Jim_Interp *interp, Jim_Obj *objPtr)) \
-[dict get $srcaddrs ${objtype}_setFromAnyProc];"
+[dict get $srcaddrs ${objtype}_setFromAnyProcUnshared];"
         $self code "Jim_ObjType* ${objtype}_ObjType = (Jim_ObjType*) [dict get $srcaddrs ${objtype}_ObjType];"
     }
 

@@ -6,6 +6,7 @@ $cc cflags -I./vendor/apriltag
 $cc include <math.h>
 $cc include <common/matd.h>
 $cc include <common/homography.h>
+$cc include <assert.h>
 
 $cc code {
     extern Jim_ObjType matd_ObjType;
@@ -18,8 +19,7 @@ $cc code {
     void matd_updateStringProc(struct Jim_Interp *interp, Jim_Obj *objPtr) {
         matd_t *mat = (matd_t *)objPtr->internalRep.ptr;
 
-        objPtr->bytes = Jim_Alloc(mat->nrows * (1 + mat->ncols * 26 + 1));
-        char *s = objPtr->bytes;
+        char *s = Jim_Alloc(mat->nrows * (1 + mat->ncols * 26 + 1));
         int i = 0;
 
         for (unsigned int row = 0; row < mat->nrows; row++) {
@@ -32,9 +32,11 @@ $cc code {
             s[i++] = '}';
         }
         s[i] = 0;
-        objPtr->length = strlen(s);
+        Jim_SetBytesOrFree(objPtr, s, strlen(s));
     }
     int matd_setFromAnyProc(Jim_Interp *interp, Jim_Obj *objPtr) {
+        assert(!Jim_IsShared(objPtr));
+
         // shimmer into a list, then iterate
         int nrows; Jim_Obj *rowObj0;
         nrows = Jim_ListLength(interp, objPtr);
