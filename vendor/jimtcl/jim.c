@@ -2288,6 +2288,40 @@ void Jim_InvalidateStringRep(Jim_Obj *objPtr)
     objPtr->bytes = NULL;
 }
 
+/* Returns 1 if successful, 0 if the object is being evaluated */
+int LockInternalRep(Jim_Obj *objPtr, int desiredState)
+{
+    while (1) {
+        int current = atomic_load_explicit(&(objPtr->semaphore), memory_order_relaxed);
+
+        if (current == JIM_SEMAPHORE_LOCKED) {
+            // Another thread is using the internalRep. This should be a short operation, so
+            // we'll just wait.
+            continue;
+        } else if (current == JIM_SEMAPHORE_EVALUATING) {
+            // Another interpreter is using this object to evaluate.
+            return 0;
+        } else {
+            // let's try to acquire it
+            int expected = JIM_SEMAPHORE_OPEN;
+            if (atomic_compare_exchange_weak_explicit(
+                &(objPtr->semaphore), &expected, desiredState, memory_order_acquire, memory_order_relaxed
+            )) {
+                // acquired!
+                return 1;
+            } else {
+                // try again
+                continue;
+            }
+        }
+    }
+}
+
+void UnlockInternalRep(Jim_Obj *objPtr)
+{
+    atomic_store_explicit(&(objPtr->semaphore), JIM_SEMAPHORE_OPEN, memory_order_release);
+}
+
 static const Jim_ObjType variableObjType;
 static const Jim_ObjType dictSubstObjType;
 static const Jim_ObjType interpolatedObjType;
@@ -2341,6 +2375,16 @@ Jim_Obj *Jim_DuplicateObj(Jim_Interp *interp, Jim_Obj *objPtr, int flags)
         atomic_store_explicit(&(dupPtr->bytes), newBytes, memory_order_release);
     }
 
+    /* lock the object's internalRep */
+    if (LockInternalRep(objPtr, JIM_SEMAPHORE_LOCKED) == 0) {
+        // object is being evaluated, so we'll just return its string rep
+        assert(bytes != NULL);
+        atomic_store_explicit(&(dupPtr->typePtr), NULL, memory_order_relaxed);
+        return dupPtr;
+    }
+
+    /* Entering critical section: typePtr must not mutate */
+
     /* By default, the new object has the same type as the old object */
     if (!Jim_SameInterp(interp, objPtr) &&
             (typePtr == &variableObjType ||
@@ -2360,7 +2404,12 @@ Jim_Obj *Jim_DuplicateObj(Jim_Interp *interp, Jim_Obj *objPtr, int flags)
             /* The dup proc may set a different type, e.g. NULL */
             typePtr->dupIntRepProc(interp, objPtr, dupPtr);
         }
+    } else {
+        atomic_store_explicit(&(dupPtr->typePtr), NULL, memory_order_relaxed);
     }
+
+    /* Exiting critical section. */
+    UnlockInternalRep(objPtr);
 
     return dupPtr;
 }
@@ -2416,7 +2465,7 @@ void Jim_SetBytesOrFree(Jim_Obj *objPtr, char *bytes, size_t len)
     // length should be deterministic so can be set twice
     objPtr->length = len;
     if (!atomic_compare_exchange_strong_explicit(
-        &objPtr->bytes, &expected, bytes, memory_order_release, memory_order_relaxed
+        &(objPtr->bytes), &expected, bytes, memory_order_release, memory_order_relaxed
     )) {
         free(bytes);
     }
@@ -2432,7 +2481,9 @@ const char *Jim_GetString(Jim_Interp *interp, Jim_Obj *objPtr, int *lenPtr)
     if (objPtr->bytes == NULL) {
         /* Invalid string repr. Generate it. */
         JimPanic((objPtr->typePtr->updateStringProc == NULL, "UpdateStringProc called against '%s' type.", objPtr->typePtr->name));
+        LockInternalRep(objPtr, JIM_SEMAPHORE_LOCKED);
         objPtr->typePtr->updateStringProc(interp, objPtr);
+        UnlockInternalRep(objPtr);
     }
     if (lenPtr)
         *lenPtr = objPtr->length;

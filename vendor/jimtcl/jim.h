@@ -182,6 +182,11 @@ extern "C" {
 #define JIM_TEMP_LIST        1
 #define JIM_FORCE_STRING     2
 
+/* Jim_Obj semaphore flags */
+#define JIM_SEMAPHORE_OPEN          0   /* No one is using internalRep */
+#define JIM_SEMAPHORE_LOCKED        1   /* internalRep is being used. May not have a valid byte rep */
+#define JIM_SEMAPHORE_EVALUATING    2   /* Object is being used for evaluation, and it have a valid byte rep */
+
 #define JIM_LIBPATH "auto_path"
 #define JIM_INTERACTIVE "tcl_interactive"
 
