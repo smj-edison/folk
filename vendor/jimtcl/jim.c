@@ -2232,7 +2232,7 @@ Jim_Obj *Jim_NewObj(Jim_Interp *interp, int onTempList)
     }
 
     objPtr->interpId = interp->interpId;
-    objPtr->refCount = onTempList ? 1 : 0;
+    atomic_store_explicit(&(objPtr->refCount), onTempList ? 1 : 0, memory_order_release);
 
     /* All the other fields are left uninitialized to save time.
      * The caller will probably want to set them to the right
@@ -2296,45 +2296,69 @@ static const Jim_ObjType commandObjType;
 /* Duplicate an object. The returned object has refcount = 0. */
 Jim_Obj *Jim_DuplicateObj(Jim_Interp *interp, Jim_Obj *objPtr, int flags)
 {
+    /* ATOMIC ASSUMPTIONS:
+     * objPtr is not freed during the entirety of this call
+     * 
+     * objPtr->bytes and objPtr->length are monotonic
+     * objPtr->bytes is always released if objPtr->length has changed
+     * 
+     * objPtr->typePtr is always released if internalRep has changed
+     * 
+     * objPtr->interpId never changes
+     */
+
     Jim_Obj *dupPtr;
 
     dupPtr = Jim_NewObj(interp, flags & JIM_TEMP_LIST);
-    if (objPtr->bytes == NULL) {
+
+    /* acquire to make sure we don't have a torn read of objPtr->len */
+    char *bytes = atomic_load_explicit(&(objPtr->bytes), memory_order_acquire);
+    /* acquire to make sure we don't have a torn read of internalRep */
+    const Jim_ObjType *typePtr = atomic_load_explicit(&(objPtr->typePtr), memory_order_acquire);
+
+    if (bytes == NULL) {
         /* Object does not have a valid string representation. */
-        dupPtr->bytes = NULL;
-    }
-    else if (objPtr->length == 0) {
+        atomic_store_explicit(&(dupPtr->bytes), NULL, memory_order_relaxed);
+    } else if (objPtr->length == 0) {
         /* Zero length, so don't even bother with the type-specific dup,
          * since all zero length objects look the same
          */
-        dupPtr->bytes = JimEmptyStringRep;
+
+        atomic_store_explicit(&(dupPtr->typePtr), NULL, memory_order_relaxed);
+
+        /* length + bytes transaction */
         dupPtr->length = 0;
-        dupPtr->typePtr = NULL;
+        atomic_store_explicit(&(dupPtr->bytes), JimEmptyStringRep, memory_order_release);
+
         return dupPtr;
-    }
-    else {
-        dupPtr->bytes = Jim_Alloc(objPtr->length + 1);
-        dupPtr->length = objPtr->length;
+    } else {
+        char *newBytes = Jim_Alloc(objPtr->length + 1);
         /* Copy the null byte too */
-        memcpy(dupPtr->bytes, objPtr->bytes, objPtr->length + 1);
+        memcpy(newBytes, bytes, objPtr->length + 1);
+
+        /* length + bytes transaction */
+        dupPtr->length = objPtr->length;
+        atomic_store_explicit(&(dupPtr->bytes), newBytes, memory_order_release);
     }
 
     /* By default, the new object has the same type as the old object */
-    dupPtr->typePtr = objPtr->typePtr;
-    if (!Jim_SameInterp(interp, objPtr) && 
-            (objPtr->typePtr == &variableObjType ||
-             objPtr->typePtr == &dictSubstObjType ||
-             objPtr->typePtr == &interpolatedObjType ||
-             objPtr->typePtr == &commandObjType)) {
+    if (!Jim_SameInterp(interp, objPtr) &&
+            (typePtr == &variableObjType ||
+             typePtr == &dictSubstObjType ||
+             typePtr == &interpolatedObjType ||
+             typePtr == &commandObjType)) {
         // cannot duplicate the these types across interpreters
-        assert(dupPtr->bytes != NULL);
-        dupPtr->typePtr = NULL;
-    } else if (objPtr->typePtr != NULL) {
-        if (objPtr->typePtr->dupIntRepProc == NULL) {
+        assert(bytes != NULL);
+        atomic_store_explicit(&(dupPtr->typePtr), NULL, memory_order_relaxed);
+    } else if (typePtr != NULL) {
+        if (typePtr->dupIntRepProc == NULL) {
             dupPtr->internalRep = objPtr->internalRep;
+            // typePtr + internalRep transaction
+            atomic_store_explicit(&(dupPtr->typePtr), typePtr, memory_order_release);
         } else {
+            atomic_store_explicit(&(dupPtr->typePtr), typePtr, memory_order_release);
             /* The dup proc may set a different type, e.g. NULL */
-            objPtr->typePtr->dupIntRepProc(interp, objPtr, dupPtr);
+            typePtr->dupIntRepProc(interp, objPtr, dupPtr);
         }
     }
 
@@ -2356,7 +2380,9 @@ Jim_Obj *Jim_DupIfShared(Jim_Interp *interp, Jim_Obj *objPtr, int flags) {
 }
 
 Jim_Obj *DupIfSharedAndWrongRep(Jim_Interp *interp, Jim_Obj *objPtr, const Jim_ObjType *typePtr, int flags) {
-    if (objPtr->typePtr != typePtr) {
+    const Jim_ObjType *objTypePtr = atomic_load_explicit(&(objPtr->typePtr), memory_order_relaxed);
+
+    if (objTypePtr != typePtr) {
         return Jim_DupIfShared(interp, objPtr, flags);
     }
 
@@ -2389,7 +2415,9 @@ void Jim_SetBytesOrFree(Jim_Obj *objPtr, char *bytes, size_t len)
     char *expected = NULL;
     // length should be deterministic so can be set twice
     objPtr->length = len;
-    if (!atomic_compare_exchange_weak(&objPtr->bytes, &expected, bytes)) {
+    if (!atomic_compare_exchange_strong_explicit(
+        &objPtr->bytes, &expected, bytes, memory_order_release, memory_order_relaxed
+    )) {
         free(bytes);
     }
 }
@@ -2399,7 +2427,7 @@ void Jim_SetBytesOrFree(Jim_Obj *objPtr, char *bytes, size_t len)
  * a new one from the internal representation of the object. If the object is
  * shared, it'll duplicate the object onto temp list and call updateStringProc.
  */
-const const char *Jim_GetString(Jim_Interp *interp, Jim_Obj *objPtr, int *lenPtr)
+const char *Jim_GetString(Jim_Interp *interp, Jim_Obj *objPtr, int *lenPtr)
 {
     if (objPtr->bytes == NULL) {
         /* Invalid string repr. Generate it. */
@@ -2446,11 +2474,16 @@ inline void Jim_IncrRefCount(Jim_Obj *objPtr) {
 }
 
 inline void Jim_DecrRefCount(Jim_Obj *objPtr) {
-    int res = atomic_fetch_sub_explicit(&(objPtr->refCount), 1, memory_order_release) - 1;
+    int afterSub = atomic_fetch_sub_explicit(&(objPtr->refCount), 1, memory_order_release) - 1;
 
-    // if < 0, Jim_FreeObj will (appropriately) panic
-    if (res <= 0) {
-        Jim_FreeObj(objPtr, res);
+    if (afterSub <= 0) {
+        // make sure object use happens-before subtraction, by linking the
+        // above release to this acquire (see rust's Arc::drop implementation
+        // for details)
+        int refCount = atomic_load_explicit(&(objPtr->refCount), memory_order_acquire);
+
+        // if res < 0, Jim_FreeObj will (appropriately) panic
+        Jim_FreeObj(objPtr, refCount);
     }
 }
 
@@ -2462,8 +2495,7 @@ inline void Jim_DecrRefCount(Jim_Obj *objPtr) {
  * that Jim_FreeNewObj() can be called only against objects
  * that are believed to have refcount == 0. */
 inline void Jim_FreeNewObj(Jim_Obj *objPtr) {
-    int refCount = atomic_load_explicit(&(objPtr->refCount), memory_order_relaxed);
-    Jim_FreeObj(objPtr, refCount);
+    Jim_FreeObj(objPtr, atomic_load_explicit(&(objPtr->refCount), memory_order_acquire));
 }
 
 inline void Jim_FreeIfZeroRef(Jim_Obj *objPtr) {
@@ -2472,7 +2504,9 @@ inline void Jim_FreeIfZeroRef(Jim_Obj *objPtr) {
 }
 
 inline int Jim_IsShared(Jim_Obj *objPtr) {
-    return atomic_load_explicit(&(objPtr->refCount), memory_order_relaxed) > 1;
+    int refCount = atomic_load_explicit(&(objPtr->refCount), memory_order_relaxed);
+
+    return refCount > 1;
 }
 
 inline int Jim_SameInterp(Jim_Interp *interp, Jim_Obj *objPtr) {
@@ -2570,7 +2604,7 @@ static int SetStringFromAnyUnshared(Jim_Interp *interp, Jim_Obj *objPtr)
 int Jim_Utf8Length(Jim_Interp *interp, Jim_Obj *objPtr)
 {
 #ifdef JIM_UTF8
-    if (objPtr->typePtr != &stringObjType) {
+    if (atomic_load_explicit(&(objPtr->typePtr), memory_order_relaxed) != &stringObjType) {
         if (Jim_IsShared(objPtr)) {
             objPtr = Jim_DuplicateObj(interp, objPtr, JIM_TEMP_LIST);
         }
@@ -2578,8 +2612,6 @@ int Jim_Utf8Length(Jim_Interp *interp, Jim_Obj *objPtr)
         SetStringFromAnyUnshared(interp, objPtr);
     }
 
-    // data races for setting this shouldn't be an issue
-    // (setting it twice is fine, there's no tricky invariants either)
     if (objPtr->internalRep.strValue.charLength < 0) {
         objPtr->internalRep.strValue.charLength = utf8_strlen(objPtr->bytes, objPtr->length);
     }
@@ -2599,15 +2631,15 @@ Jim_Obj *Jim_NewStringObj(Jim_Interp *interp, const char *s, int len)
         len = strlen(s);
     /* Alloc/Set the string rep. */
     if (len == 0) {
-        objPtr->bytes = JimEmptyStringRep;
+        atomic_store_explicit(&(objPtr->bytes), JimEmptyStringRep, memory_order_relaxed);
     }
     else {
-        objPtr->bytes = Jim_StrDupLen(s, len);
+        atomic_store_explicit(&(objPtr->bytes), Jim_StrDupLen(s, len), memory_order_relaxed);
     }
     objPtr->length = len;
 
     /* No typePtr field for the vanilla string object. */
-    objPtr->typePtr = NULL;
+    atomic_store_explicit(&(objPtr->typePtr), NULL, memory_order_relaxed);
     return objPtr;
 }
 
@@ -3135,12 +3167,7 @@ static Jim_Obj *JimStringTrim(Jim_Interp *interp, Jim_Obj *strObjPtr, Jim_Obj *t
     /* Now trim right */
     strObjPtr = JimStringTrimRight(interp, objPtr, trimcharsObjPtr);
 
-    /* Note: refCount check is needed since objPtr may be emptyObj */
-    int refCount = atomic_load_explicit(&(objPtr->refCount), memory_order_relaxed);
-    if (objPtr != strObjPtr && refCount == 0) {
-        /* We don't want this object to be leaked */
-        Jim_FreeNewObj(objPtr);
-    }
+    if (objPtr != strObjPtr) Jim_FreeIfZeroRef(objPtr);
 
     return strObjPtr;
 }
@@ -5323,7 +5350,9 @@ static Jim_Obj *JimDictExpandArrayVariable(Jim_Interp *interp, Jim_Obj *varObjPt
         // it's not freed when dictObjPtr is freed
         if (resObjPtr) Jim_IncrRefCount(resObjPtr);
         Jim_DecrRefCount(dictObjPtr);
-        if (resObjPtr) resObjPtr->refCount--;
+        if (resObjPtr) {
+            atomic_fetch_sub_explicit(&(resObjPtr->refCount), 1, memory_order_relaxed);
+        }
     }
 
     return resObjPtr;
@@ -5715,11 +5744,14 @@ void Jim_RewindTempListTo(Jim_Interp *interp, size_t to)
         /* refCount should be exactly 1, e.g. owned by this list
          * (don't use Jim's DecrRefCount as the temp list can't have its
          * elements freed with the global allocator) */
-        int refCount = atomic_load_explicit(&(tempList->objects[i].refCount), memory_order_relaxed);
+        int refCount = atomic_load_explicit(&(tempList->objects[i].refCount), memory_order_acquire);
         JimPanic((refCount != 1, "tempList object with bad refCount %d (should be 1)", refCount));
 
         Jim_FreeIntRep(&tempList->objects[i]);
         Jim_InvalidateStringRep(&tempList->objects[i]);
+
+        // for debugging
+        atomic_store_explicit(&(tempList->objects[i].refCount), -100, memory_order_relaxed);
     }
 
     tempList->length = to;
@@ -7238,7 +7270,7 @@ static int Jim_ListIndices(Jim_Interp *interp, Jim_Obj *listPtr,
             // (rc-- instead of Jim_DecrRefCount)
             Jim_IncrRefCount(objPtr);
             Jim_FreeNewObj(listPtr);
-            objPtr->refCount--;
+            atomic_fetch_sub_explicit(&(objPtr->refCount), 1, memory_order_relaxed);
             listPtr = objPtr;
         } else {
             listPtr = objPtr;
@@ -11654,7 +11686,7 @@ static int JimCallProcedure(Jim_Interp *interp, Jim_Cmd *cmd, int argc, Jim_Obj 
     i = 1;
     for (d = 0; d < cmd->u.proc.argListLen; d++) {
         Jim_Obj *nameObjPtr = cmd->u.proc.arglist[d].nameObjPtr;
-        nameObjPtr = DupIfWrongInterp(interp, nameObjPtr, JIM_LIVE_LIST);
+        assert(Jim_SameInterp(interp, nameObjPtr));
         Jim_IncrRefCount(nameObjPtr);
 
         if (d == cmd->u.proc.argsPos) {
@@ -14389,8 +14421,8 @@ static int Jim_UpvarCoreCommand(Jim_Interp *interp, int argc, Jim_Obj *const *ar
 
     /* Now... for every other/local couple: */
     for (i = 1; i < argc; i += 2) {
-        Jim_Obj *localVarNamePtr = DupIfWrongInterp(interp, argv[i + 1], JIM_TEMP_LIST);
-        if (Jim_SetVariableLink(interp, localVarNamePtr, argv[i], targetCallFrame) != JIM_OK)
+        assert(Jim_SameInterp(interp, argv[i + 1]));
+        if (Jim_SetVariableLink(interp, argv[i + 1], argv[i], targetCallFrame) != JIM_OK)
             return JIM_ERR;
     }
     return JIM_OK;
@@ -14412,8 +14444,8 @@ static int Jim_GlobalCoreCommand(Jim_Interp *interp, int argc, Jim_Obj *const *a
         /* global ::blah does nothing */
         const char *name = Jim_String(interp, argv[i]);
         if (name[0] != ':' || name[1] != ':') {
-            Jim_Obj *localVarNamePtr = DupIfWrongInterp(interp, argv[i], JIM_TEMP_LIST);
-            if (Jim_SetVariableLink(interp, localVarNamePtr, argv[i], interp->topFramePtr) != JIM_OK)
+            assert(Jim_SameInterp(interp, argv[i]));
+            if (Jim_SetVariableLink(interp, argv[i], argv[i], interp->topFramePtr) != JIM_OK)
                 return JIM_ERR;
         }
     }

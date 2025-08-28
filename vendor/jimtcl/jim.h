@@ -299,18 +299,16 @@ struct Jim_Interp;
 typedef struct Jim_Obj {
 #ifdef __cplusplus
     std::atomic<char *> bytes;
+    const std::atomic<Jim_ObjType *> typePtr;
+    std::atomic<int> refCount;
 #else
     char * _Atomic bytes; /* string representation buffer. NULL = no string repr. */
-#endif
-    const struct Jim_ObjType *typePtr; /* object type. */
-#ifdef __cplusplus
-    std::atomic<int> refCount;
-    std::atomic<int> length;
-#else
+    const struct Jim_ObjType * _Atomic typePtr; /* object type. */
     _Atomic int refCount; /* reference count */
-    _Atomic int length; /* number of bytes in 'bytes', not including the null term. */
 #endif
-    unsigned long long interpId; /* parent interpreter */
+    int length; /* number of bytes in 'bytes', not including the null term. */
+    unsigned int interpId; /* parent interpreter */
+    _Atomic int semaphore; 
     /* Internal representation union */
     union {
         /* integer number type */
@@ -761,7 +759,7 @@ JIM_EXPORT Jim_HashEntry * Jim_NextHashEntry
 /* objects */
 JIM_EXPORT Jim_Obj * Jim_NewObj (Jim_Interp *interp, int onTempList);
 JIM_EXPORT Jim_Obj * Jim_NewObjNoInterp ();
-JIM_EXPORT void Jim_FreeObj (Jim_Obj *objPtr, int latestRefCount);
+JIM_EXPORT void Jim_FreeObj (Jim_Obj *objPtr, int currentRefCount);
 JIM_EXPORT void Jim_InvalidateStringRep (Jim_Obj *objPtr);
 JIM_EXPORT Jim_Obj * Jim_DuplicateObj (Jim_Interp *interp,
         Jim_Obj *objPtr, int flags);
