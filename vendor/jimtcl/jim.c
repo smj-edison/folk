@@ -11688,7 +11688,7 @@ static int JimCallProcedure(Jim_Interp *interp, Jim_Cmd *cmd, int argc, Jim_Obj 
     i = 1;
     for (d = 0; d < cmd->u.proc.argListLen; d++) {
         Jim_Obj *nameObjPtr = cmd->u.proc.arglist[d].nameObjPtr;
-        assert(Jim_SameInterp(interp, nameObjPtr));
+        nameObjPtr = DupIfWrongInterp(interp, nameObjPtr, JIM_LIVE_LIST);
         Jim_IncrRefCount(nameObjPtr);
 
         if (d == cmd->u.proc.argsPos) {

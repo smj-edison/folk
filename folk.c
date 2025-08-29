@@ -1155,9 +1155,9 @@ void traceItem(char* buf, size_t bufsz, WorkQueueItem item) {
         Statement* stmt = statementUnsafeGet(db, item.run.stmt);
         Clause* trieWhenPattern = jimClauseToTrieClause(interp, item.run.whenPattern);
         snprintf(buf, bufsz, "Run when(%.100s) pattern(%.100s) stmt(%.100s)",
-                 when != NULL ? clauseToString(statementTrieClause(when)) : "NULL",
+                 when != NULL ? Jim_String(interp, statementJimClause(when)) : "NULL",
                  clauseToString(trieWhenPattern),
-                 stmt != NULL ? clauseToString(statementTrieClause(stmt)) : "NULL");
+                 stmt != NULL ? Jim_String(interp, statementJimClause(stmt)) : "NULL");
         clauseFree(trieWhenPattern);
     } else if (item.op == EVAL) {
         snprintf(buf, bufsz, "Eval");

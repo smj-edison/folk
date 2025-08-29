@@ -35,6 +35,7 @@ $cc code {
         Jim_SetBytesOrFree(objPtr, s, strlen(s));
     }
     int matd_setFromAnyProc(Jim_Interp *interp, Jim_Obj *objPtr) {
+        if (objPtr->typePtr == &matd_ObjType) { return JIM_OK; }
         assert(!Jim_IsShared(objPtr));
 
         // shimmer into a list, then iterate
@@ -70,9 +71,13 @@ $cc code {
     };
 }
 $cc argtype matd_t* {
-    __ENSURE_OK(matd_setFromAnyProc(interp, $obj));
     matd_t* $argname;
-    $argname = (matd_t*) $obj->internalRep.ptr;
+
+    {
+        Jim_Obj* dupObj = DupIfSharedAndWrongRep(interp, $obj, &matd_ObjType, JIM_TEMP_LIST);
+        __ENSURE_OK(matd_setFromAnyProc(interp, dupObj));
+        $argname = (matd_t*) dupObj->internalRep.ptr;
+    }
 }
 $cc rtype matd_t* {
     $robj = Jim_NewObj(interp, JIM_LIVE_LIST);

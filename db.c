@@ -928,7 +928,7 @@ Statement* dbInsertOrReuseStatement(Db* db, Jim_Interp* interp,
 
     // everything following this is going to be _incredibly_ slow if
     // it's not a list type
-    if (Jim_IsShared(jimClause) && jimClause->typePtr != Jim_ListType()) {
+    if (Jim_IsShared(jimClause) && !Jim_IsList(jimClause)) {
         Jim_Obj* jimClauseAsList = Jim_DuplicateObj(interp, jimClause, JIM_LIVE_LIST);
         Jim_DecrRefCount(jimClause);
         jimClause = jimClauseAsList;

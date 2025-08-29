@@ -459,7 +459,7 @@ C method struct {type fields} {
             };
 
             Jim_ObjType* expected = NULL;
-            if (!atomic_compare_exchange_weak(&$[set type]_ObjType, &expected, $[set type]_ObjTypeAttempt)) {
+            if (!atomic_compare_exchange_strong(&$[set type]_ObjType, &expected, $[set type]_ObjTypeAttempt)) {
                 free($[set type]_ObjTypeAttempt);
             }
 
