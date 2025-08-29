@@ -182,11 +182,6 @@ extern "C" {
 #define JIM_TEMP_LIST        1
 #define JIM_FORCE_STRING     2
 
-/* Jim_Obj semaphore flags */
-#define JIM_SEMAPHORE_OPEN          0   /* No one is using internalRep */
-#define JIM_SEMAPHORE_LOCKED        1   /* internalRep is being used. May not have a valid byte rep */
-#define JIM_SEMAPHORE_EVALUATING    2   /* Object is being used for evaluation, and it have a valid byte rep */
-
 #define JIM_LIBPATH "auto_path"
 #define JIM_INTERACTIVE "tcl_interactive"
 
@@ -313,7 +308,7 @@ typedef struct Jim_Obj {
 #endif
     int length; /* number of bytes in 'bytes', not including the null term. */
     unsigned int interpId; /* parent interpreter */
-    _Atomic int semaphore; 
+    const struct Jim_InterpObjType *interpTypePtr; /* interpreter's object type. */
     /* Internal representation union */
     union {
         /* integer number type */
@@ -322,8 +317,6 @@ typedef struct Jim_Obj {
         int intValue;
         /* double number type */
         double doubleValue;
-        /* Generic pointer */
-        void *ptr;
         /* Generic two pointers value */
         struct {
             void *ptr1;
@@ -335,6 +328,29 @@ typedef struct Jim_Obj {
             int int1;
             int int2;
         } ptrIntValue;
+        /* Source type */
+        struct {
+            struct Jim_Obj *fileNameObj;
+            int lineNumber;
+        } sourceValue;
+        /* String type */
+        struct {
+            int maxLength;
+            int charLength;     /* utf-8 char length. -1 if unknown */
+        } strValue;
+        /* List object */
+        struct {
+            struct Jim_Obj **ele;    /* Elements vector */
+            int len;        /* Length */
+            int maxLen;        /* Allocated 'ele' length */
+        } listValue;
+        /* dict object */
+        struct Jim_Dict *dictValue;
+    } internalRep;
+    /* Interpreter internal representation union */
+    union {
+        /* Generic pointer */
+        void *ptr;
         /* Variable object */
         struct {
             struct Jim_VarVal *vv;
@@ -347,29 +363,6 @@ typedef struct Jim_Obj {
             struct Jim_Cmd *cmdPtr;
             unsigned long procEpoch; /* for caching */
         } cmdValue;
-        /* List object */
-        struct {
-            struct Jim_Obj **ele;    /* Elements vector */
-            int len;        /* Length */
-            int maxLen;        /* Allocated 'ele' length */
-        } listValue;
-        /* dict object */
-        struct Jim_Dict *dictValue;
-        /* String type */
-        struct {
-            int maxLength;
-            int charLength;     /* utf-8 char length. -1 if unknown */
-        } strValue;
-        /* Reference type */
-        struct {
-            unsigned long id;
-            struct Jim_Reference *refPtr;
-        } refValue;
-        /* Source type */
-        struct {
-            struct Jim_Obj *fileNameObj;
-            int lineNumber;
-        } sourceValue;
         /* Dict substitution type */
         struct {
             struct Jim_Obj *varNameObjPtr;
@@ -379,7 +372,7 @@ typedef struct Jim_Obj {
             int line;
             int argc;
         } scriptLineValue;
-    } internalRep;
+    } interpInternalRep;
 } Jim_Obj;
 
 #ifdef __cplusplus
@@ -400,12 +393,16 @@ int Jim_SameInterp(struct Jim_Interp *interp, Jim_Obj *objPtr);
     if ((o)->typePtr && (o)->typePtr->freeIntRepProc) \
         (o)->typePtr->freeIntRepProc(o)
 
+#define Jim_FreeInterpIntRep(o) \
+    if ((o)->interpTypePtr && (o)->interpTypePtr->freeIntRepProc) \
+        (o)->interpTypePtr->freeIntRepProc(o)
+
 /* Get the internal representation pointer */
-#define Jim_GetIntRepPtr(o) (o)->internalRep.ptr
+#define Jim_GetInterpIntRepPtr(o) (o)->interpInternalRep.ptr
 
 /* Set the internal representation pointer */
-#define Jim_SetIntRepPtr(o, p) \
-    (o)->internalRep.ptr = (p)
+#define Jim_SetInterpIntRepPtr(o, p) \
+    (o)->interpInternalRep.ptr = (p)
 
 /* The object type structure.
  * There are three methods.
@@ -435,6 +432,14 @@ typedef struct Jim_ObjType {
     Jim_UpdateStringProc *updateStringProc;
     int flags;
 } Jim_ObjType;
+
+typedef struct Jim_InterpObjType {
+    const char *name; /* The name of the type. */
+    Jim_FreeInternalRepProc *freeIntRepProc;
+    Jim_DupInternalRepProc *dupIntRepProc;
+    Jim_UpdateStringProc *updateStringProc;
+    int flags;
+} Jim_InterpObjType;
 
 /* Jim_ObjType flags */
 #define JIM_TYPE_NONE 0        /* No flags */
