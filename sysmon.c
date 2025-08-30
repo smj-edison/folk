@@ -75,10 +75,10 @@ void sysmon() {
             // Hard die if we are likely to run out of RAM, because
             // that will lock the system (making it hard to ssh in,
             // etc).
-            fprintf(stderr, "--------------------\n"
+            /*fprintf(stderr, "--------------------\n"
                     "OUT OF RAM, EXITING.\n"
                     "--------------------\n");
-            exit(1);
+            exit(1);*/
         }
     }
 #endif

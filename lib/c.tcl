@@ -287,7 +287,6 @@ C method code {newcode} {
     lassign [info source $newcode] filename line
     if {$filename ne ""} { 
         set newcode [subst {
-            #line $line "$filename"
             $newcode
         }]
     }
@@ -396,6 +395,7 @@ C method struct {type fields} {
             dupPtr->internalRep.ptrIntValue.ptr = malloc(sizeof($type));
             dupPtr->internalRep.ptrIntValue.int1 = 1;
             memcpy(dupPtr->internalRep.ptrIntValue.ptr, srcPtr->internalRep.ptrIntValue.ptr, sizeof($type));
+            atomic_store_explicit(&(dupPtr->typePtr), $[set type]_ObjType, memory_order_release);
         }
         void $[set type]_updateStringProc(Jim_Interp* interp, Jim_Obj *objPtr) {
             $[set type] *robj = ($[set type] *) objPtr->internalRep.ptrIntValue.ptr;
@@ -420,7 +420,8 @@ C method struct {type fields} {
             }] "\n"]
         }
         int $[set type]_setFromAnyProcUnshared(Jim_Interp *interp, Jim_Obj *objPtr) {
-            if (objPtr->typePtr == $[set type]_ObjType) { return JIM_OK; }
+            const Jim_ObjType* typePtr = atomic_load_explicit(&(objPtr->typePtr), memory_order_relaxed);
+            if (typePtr == $[set type]_ObjType) { return JIM_OK; }
             assert(!Jim_IsShared(objPtr));
 
             Jim_Obj* __tmpObj;
@@ -442,9 +443,9 @@ C method struct {type fields} {
             }] "\n"]
 
             Jim_FreeIntRep(objPtr);
-            objPtr->typePtr = $[set type]_ObjType;
             objPtr->internalRep.ptrIntValue.ptr = robj;
             objPtr->internalRep.ptrIntValue.int1 = 1;
+            atomic_store_explicit(&(objPtr->typePtr), $[set type]_ObjType, memory_order_release);
             return JIM_OK;
         }
 
@@ -482,11 +483,11 @@ C method struct {type fields} {
 
     $self rtype $type {
         $robj = Jim_NewObj(interp, JIM_LIVE_LIST);
-        $robj->bytes = NULL;
-        $robj->typePtr = $[set rtype]_ObjType;
+        atomic_store_explicit(&($robj->bytes), NULL, memory_order_relaxed);
         $robj->internalRep.ptrIntValue.ptr = malloc(sizeof($[set rtype]));
         $robj->internalRep.ptrIntValue.int1 = 1;
         memcpy($robj->internalRep.ptrIntValue.ptr, &$rvalue, sizeof($[set rtype]));
+        atomic_store_explicit(&($robj->typePtr), $[set rtype]_ObjType, memory_order_release);
     }
 
     # Generate Tcl getter functions for each field:
@@ -578,7 +579,7 @@ C method proc {name arguments rtype body} {
     dict set procs $name code [subst {
         static $decayedRtype $cname ([join $arglist ", "]) {
             [if {$filename ne ""} {
-                subst {#line $line "$filename"}
+                subst {}
             } else {list}]
             $body
         }

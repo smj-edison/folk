@@ -2217,6 +2217,12 @@ static int JimParseListStr(struct JimParserCtx *pc)
  * Jim_Obj related functions
  * ---------------------------------------------------------------------------*/
 
+/* Atomically set typePtr with memory_order_release */
+ static inline void SetTypePtr(Jim_Obj *obj, const Jim_ObjType *val)
+{
+    atomic_store_explicit(&(obj->typePtr), val, memory_order_release);
+}
+
 /* Return a new initialized object. */
 Jim_Obj *Jim_NewObj(Jim_Interp *interp, int onTempList)
 {
@@ -2230,6 +2236,8 @@ Jim_Obj *Jim_NewObj(Jim_Interp *interp, int onTempList)
     } else {
         objPtr = Jim_Alloc(sizeof(*objPtr));
     }
+
+    objPtr->interpTypePtr = NULL;
 
     objPtr->interpId = interp->interpId;
     atomic_store_explicit(&(objPtr->refCount), onTempList ? 1 : 0, memory_order_release);
@@ -2246,7 +2254,9 @@ Jim_Obj *Jim_NewObjNoInterp()
     Jim_Obj *objPtr = Jim_Alloc(sizeof(*objPtr));
 
     objPtr->interpId = 0;
-    objPtr->refCount = 0;
+    atomic_store_explicit(&(objPtr->refCount), 0, memory_order_relaxed);
+
+    objPtr->interpTypePtr = NULL;
 
     /* All the other fields are left uninitialized to save time.
      * The caller will probably want to set them to the right
@@ -2266,12 +2276,13 @@ void Jim_FreeObj(Jim_Obj *objPtr, int latestRefCount)
 
     /* Free the internal representation */
     Jim_FreeIntRep(objPtr);
+    Jim_FreeInterpIntRep(objPtr);
 
     /* Free the string representation */
     if (objPtr->bytes != NULL) {
         if (objPtr->bytes != JimEmptyStringRep)
             Jim_Free(objPtr->bytes);
-        objPtr->bytes = NULL;
+        atomic_store_explicit(&(objPtr->bytes), NULL, memory_order_release);
     }
 
     Jim_Free(objPtr);
@@ -2285,7 +2296,7 @@ void Jim_InvalidateStringRep(Jim_Obj *objPtr)
         if (objPtr->bytes != JimEmptyStringRep)
             Jim_Free(objPtr->bytes);
     }
-    objPtr->bytes = NULL;
+    atomic_store_explicit(&(objPtr->bytes), NULL, memory_order_relaxed);
 }
 
 /* Duplicate an object. The returned object has refcount = 0. */
@@ -2375,7 +2386,8 @@ Jim_Obj *Jim_DuplicateObj(Jim_Interp *interp, Jim_Obj *objPtr, int flags)
  * FLAGS:
  * JIM_TEMP_LIST: put it on the temp list to be cleared later */
 Jim_Obj *Jim_DupIfShared(Jim_Interp *interp, Jim_Obj *objPtr, int flags) {
-    if (Jim_IsShared(objPtr)) {
+    /* Why check the interpreter id? */
+    if (Jim_IsShared(objPtr) || objPtr->interpId != interp->interpId) {
         objPtr = Jim_DuplicateObj(interp, objPtr, flags);
     }
 
@@ -2583,10 +2595,10 @@ static int SetStringFromAnyUnshared(Jim_Interp *interp, Jim_Obj *objPtr)
         /* Free any other internal representation. */
         Jim_FreeIntRep(objPtr);
         /* Set it as string, i.e. just set the maxLength field. */
-        objPtr->typePtr = &stringObjType;
         objPtr->internalRep.strValue.maxLength = objPtr->length;
         /* Don't know the utf-8 length yet */
         objPtr->internalRep.strValue.charLength = -1;
+        SetTypePtr(objPtr, &stringObjType);
     }
     return JIM_OK;
 }
@@ -2624,18 +2636,18 @@ Jim_Obj *Jim_NewStringObj(Jim_Interp *interp, const char *s, int len)
     /* Need to find out how many bytes the string requires */
     if (len == -1)
         len = strlen(s);
+
+    objPtr->length = len;
     /* Alloc/Set the string rep. */
     if (len == 0) {
-        atomic_store_explicit(&(objPtr->bytes), JimEmptyStringRep, memory_order_relaxed);
+        atomic_store_explicit(&(objPtr->bytes), JimEmptyStringRep, memory_order_release);
     }
     else {
-        atomic_store_explicit(&(objPtr->bytes), Jim_StrDupLen(s, len), memory_order_relaxed);
+        atomic_store_explicit(&(objPtr->bytes), Jim_StrDupLen(s, len), memory_order_release);
     }
-    objPtr->length = len;
 
     /* No typePtr field for the vanilla string object. */
     atomic_store_explicit(&(objPtr->typePtr), NULL, memory_order_relaxed);
-    objPtr->interpTypePtr = NULL;
     return objPtr;
 }
 
@@ -2646,18 +2658,18 @@ Jim_Obj *Jim_NewStringObjNoInterp(const char *s, int len)
     /* Need to find out how many bytes the string requires */
     if (len == -1)
         len = strlen(s);
+
+    objPtr->length = len;
     /* Alloc/Set the string rep. */
     if (len == 0) {
-        objPtr->bytes = JimEmptyStringRep;
+        atomic_store_explicit(&(objPtr->bytes), JimEmptyStringRep, memory_order_release);
     }
     else {
-        objPtr->bytes = Jim_StrDupLen(s, len);
+        atomic_store_explicit(&(objPtr->bytes), Jim_StrDupLen(s, len), memory_order_release);
     }
-    objPtr->length = len;
 
     /* No typePtr field for the vanilla string object. */
-    objPtr->typePtr = NULL;
-    objPtr->interpTypePtr = NULL;
+    atomic_store_explicit(&(objPtr->typePtr), NULL, memory_order_relaxed);
     return objPtr;
 }
 
@@ -2673,7 +2685,7 @@ Jim_Obj *Jim_NewStringObjUtf8(Jim_Interp *interp, const char *s, int charlen)
     /* Remember the utf8 length, so set the type */
     objPtr->internalRep.strValue.maxLength = bytelen;
     objPtr->internalRep.strValue.charLength = charlen;
-    atomic_store_explicit(&(objPtr->typePtr), &stringObjType, memory_order_release);    
+    SetTypePtr(objPtr, &stringObjType);
 
     return objPtr;
 #else
@@ -2687,10 +2699,11 @@ Jim_Obj *Jim_NewStringObjNoAlloc(Jim_Interp *interp, char *s, int len)
 {
     Jim_Obj *objPtr = Jim_NewObj(interp, JIM_LIVE_LIST);
 
-    objPtr->bytes = s;
+    atomic_store_explicit(&(objPtr->typePtr), NULL, memory_order_relaxed);
+
     objPtr->length = (len == -1) ? strlen(s) : len;
-    objPtr->typePtr = NULL;
-    objPtr->interpTypePtr = NULL;
+    atomic_store_explicit(&(objPtr->bytes), s, memory_order_release);
+
     return objPtr;
 }
 
@@ -3287,6 +3300,7 @@ static const Jim_InterpObjType comparedStringObjType = {
  * Note: this isn't binary safe, but it hardly needs to be.*/
 int Jim_CompareStringImmediate(Jim_Interp *interp, Jim_Obj *objPtr, const char *str)
 {
+    // TODO: optimize (don't duplicate, just compare against string)
     objPtr = DupIfWrongInterp(interp, objPtr, JIM_TEMP_LIST);
 
     if (objPtr->interpTypePtr == &comparedStringObjType && objPtr->interpInternalRep.ptr == str) {
@@ -3879,7 +3893,7 @@ void Jim_SetSourceInfo(Jim_Interp *interp, Jim_Obj *objPtr,
     Jim_IncrRefCount(fileNameObj);
     objPtr->internalRep.sourceValue.fileNameObj = fileNameObj;
     objPtr->internalRep.sourceValue.lineNumber = lineNumber;
-    objPtr->typePtr = &sourceObjType;
+    SetTypePtr(objPtr, &sourceObjType);
 }
 
 /**
@@ -5247,6 +5261,8 @@ int Jim_UnsetVariable(Jim_Interp *interp, Jim_Obj *nameObjPtr, int flags)
 static void JimDictSugarParseVarKey(Jim_Interp *interp, Jim_Obj *objPtr,
     Jim_Obj **varPtrPtr, Jim_Obj **keyPtrPtr)
 {
+    JimPanic((!Jim_SameInterp(interp, objPtr), "JimDictSugarParseVarKey() called with object from another interpreter"));
+
     const char *str, *p;
     int len, keyLen;
     Jim_Obj *varObjPtr, *keyObjPtr;
@@ -6058,7 +6074,7 @@ static int SetIntFromAnyUnshared(Jim_Interp *interp, Jim_Obj *objPtr, int flags)
 
     if (objPtr->typePtr == &coercedDoubleObjType) {
         /* Simple switch */
-        objPtr->typePtr = &intObjType;
+        atomic_store_explicit(&(objPtr->typePtr), &intObjType, memory_order_relaxed);
         return JIM_OK;
     }
 
@@ -6077,8 +6093,8 @@ static int SetIntFromAnyUnshared(Jim_Interp *interp, Jim_Obj *objPtr, int flags)
     }
     /* Free the old internal repr and set the new one. */
     Jim_FreeIntRep(objPtr);
-    objPtr->typePtr = &intObjType;
     objPtr->internalRep.wideValue = wideValue;
+    SetTypePtr(objPtr, &intObjType);
     return JIM_OK;
 }
 
@@ -6163,10 +6179,9 @@ Jim_Obj *Jim_NewIntObj(Jim_Interp *interp, jim_wide wideValue)
     Jim_Obj *objPtr;
 
     objPtr = Jim_NewObj(interp, JIM_LIVE_LIST);
-    objPtr->typePtr = &intObjType;
-    objPtr->interpTypePtr = NULL;
-    objPtr->bytes = NULL;
+    atomic_store_explicit(&(objPtr->bytes), NULL, memory_order_relaxed);
     objPtr->internalRep.wideValue = wideValue;
+    SetTypePtr(objPtr, &intObjType);
     return objPtr;
 }
 
@@ -6263,7 +6278,7 @@ static int SetDoubleFromAnyUnshared(Jim_Interp *interp, Jim_Obj *objPtr)
         && JimWideValue(objPtr) <= MAX_INT_IN_DOUBLE) {
 
         /* Direct conversion to coerced double */
-        objPtr->typePtr = &coercedDoubleObjType;
+        atomic_store_explicit(&(objPtr->typePtr), &coercedDoubleObjType, memory_order_relaxed);
         return JIM_OK;
     }
 #endif
@@ -6275,8 +6290,9 @@ static int SetDoubleFromAnyUnshared(Jim_Interp *interp, Jim_Obj *objPtr)
     if (Jim_StringToWide(str, &wideValue, 10) == JIM_OK) {
         /* Managed to convert to an int, so we can use this as a cooerced double */
         Jim_FreeIntRep(objPtr);
-        objPtr->typePtr = &coercedDoubleObjType;
         objPtr->internalRep.wideValue = wideValue;
+        SetTypePtr(objPtr, &coercedDoubleObjType);
+
         return JIM_OK;
     }
     else {
@@ -6288,8 +6304,10 @@ static int SetDoubleFromAnyUnshared(Jim_Interp *interp, Jim_Obj *objPtr)
         /* Free the old internal repr and set the new one. */
         Jim_FreeIntRep(objPtr);
     }
-    objPtr->typePtr = &doubleObjType;
+
     objPtr->internalRep.doubleValue = doubleValue;
+    SetTypePtr(objPtr, &doubleObjType);
+
     return JIM_OK;
 }
 
@@ -6321,10 +6339,11 @@ Jim_Obj *Jim_NewDoubleObj(Jim_Interp *interp, double doubleValue)
     Jim_Obj *objPtr;
 
     objPtr = Jim_NewObj(interp, JIM_LIVE_LIST);
-    objPtr->typePtr = &doubleObjType;
-    objPtr->interpTypePtr = NULL;
-    objPtr->bytes = NULL;
+    atomic_store_explicit(&(objPtr->bytes), NULL, memory_order_relaxed);
+
     objPtr->internalRep.doubleValue = doubleValue;
+    SetTypePtr(objPtr, &doubleObjType);
+
     return objPtr;
 }
 
@@ -6368,7 +6387,7 @@ static int SetBooleanFromAnyUnshared(Jim_Interp *interp, Jim_Obj *objPtr, int fl
 
     /* Free the old internal repr and set the new one. */
     Jim_FreeIntRep(objPtr);
-    objPtr->typePtr = &intObjType;
+    SetTypePtr(objPtr, &intObjType);
     /* 4 true values in jim_true_false_strings */
     objPtr->internalRep.wideValue = index < 4 ? 1 : 0;
     return JIM_OK;
@@ -6434,7 +6453,7 @@ void DupListInternalRep(Jim_Interp *interp, Jim_Obj *srcPtr, Jim_Obj *dupPtr)
         dupPtr->internalRep.listValue.ele = NULL;
     }
 
-    dupPtr->typePtr = &listObjType;
+    SetTypePtr(dupPtr, &listObjType);
 }
 
 /* The following function checks if a given string can be encoded
@@ -6715,10 +6734,10 @@ static int SetListFromAnyUnshared(Jim_Interp *interp, struct Jim_Obj *objPtr)
          */
 
         /* 1. Switch the internal rep */
-        objPtr->typePtr = &listObjType;
         objPtr->internalRep.listValue.len = dict->len;
         objPtr->internalRep.listValue.maxLen = dict->maxLen;
         objPtr->internalRep.listValue.ele = dict->table;
+        SetTypePtr(objPtr, &listObjType);
 
         /* 2. Discard the hash table */
         Jim_Free(dict->ht);
@@ -6738,10 +6757,10 @@ static int SetListFromAnyUnshared(Jim_Interp *interp, struct Jim_Obj *objPtr)
     /* Free the old internal repr just now and initialize the
      * new one just now. The string->list conversion can't fail. */
     Jim_FreeIntRep(objPtr);
-    objPtr->typePtr = &listObjType;
     objPtr->internalRep.listValue.len = 0;
     objPtr->internalRep.listValue.maxLen = 0;
     objPtr->internalRep.listValue.ele = NULL;
+    SetTypePtr(objPtr, &listObjType);
 
     /* Convert into a list */
     if (strLen) {
@@ -6776,12 +6795,12 @@ Jim_Obj *Jim_NewListObj(Jim_Interp *interp, Jim_Obj *const *elements, int len)
     Jim_Obj *objPtr;
 
     objPtr = Jim_NewObj(interp, JIM_LIVE_LIST);
-    objPtr->typePtr = &listObjType;
-    objPtr->interpTypePtr = NULL;
-    objPtr->bytes = NULL;
+
+    atomic_store_explicit(&(objPtr->bytes), NULL, memory_order_relaxed);
     objPtr->internalRep.listValue.ele = NULL;
     objPtr->internalRep.listValue.len = 0;
     objPtr->internalRep.listValue.maxLen = 0;
+    SetTypePtr(objPtr, &listObjType);
 
     if (len) {
         ListInsertElements(objPtr, 0, len, elements);
@@ -6795,12 +6814,11 @@ Jim_Obj *Jim_NewListObjNoInterp(Jim_Obj *const *elements, int len)
     Jim_Obj *objPtr;
 
     objPtr = Jim_NewObjNoInterp();
-    objPtr->typePtr = &listObjType;
-    objPtr->interpTypePtr = NULL;
-    objPtr->bytes = NULL;
+    atomic_store_explicit(&(objPtr->bytes), NULL, memory_order_relaxed);
     objPtr->internalRep.listValue.ele = NULL;
     objPtr->internalRep.listValue.len = 0;
     objPtr->internalRep.listValue.maxLen = 0;
+    SetTypePtr(objPtr, &listObjType);
 
     if (len) {
         ListInsertElements(objPtr, 0, len, elements);
@@ -7705,7 +7723,7 @@ static void DupDictInternalRep(Jim_Interp *interp, Jim_Obj *srcPtr, Jim_Obj *dup
     memcpy(newDict->ht, oldDict->ht, sizeof(*oldDict->ht) * oldDict->size);
 
     dupPtr->internalRep.dictValue = newDict;
-    dupPtr->typePtr = &dictObjType;
+    SetTypePtr(dupPtr, &dictObjType);
 }
 
 static void UpdateStringOfDict(Jim_Interp *interp, struct Jim_Obj *objPtr)
@@ -7765,8 +7783,8 @@ static int SetDictFromAnyUnguarded(Jim_Interp *interp, struct Jim_Obj *objPtr)
             }
         }
 
-        objPtr->typePtr = &dictObjType;
         objPtr->internalRep.dictValue = dict;
+        SetTypePtr(objPtr, &dictObjType);
 
         return JIM_OK;
     }
@@ -7870,13 +7888,13 @@ Jim_Obj *Jim_NewDictObj(Jim_Interp *interp, Jim_Obj *const *elements, int len)
     JimPanic((len % 2, "Jim_NewDictObj() 'len' argument must be even"));
 
     objPtr = Jim_NewObj(interp, JIM_LIVE_LIST);
-    objPtr->typePtr = &dictObjType;
-    objPtr->interpTypePtr = NULL;
-    objPtr->bytes = NULL;
+    atomic_store_explicit(&(objPtr->bytes), NULL, memory_order_relaxed);
 
     objPtr->internalRep.dictValue = JimDictNew(interp, len, len);
     for (i = 0; i < len; i += 2)
         DictAddElementUnshared(interp, objPtr, elements[i], elements[i + 1]);
+
+    SetTypePtr(objPtr, &dictObjType);
     return objPtr;
 }
 
@@ -8158,8 +8176,8 @@ static int SetIndexFromAnyUnshared(Jim_Interp *interp, Jim_Obj *objPtr)
 
     /* Free the old internal repr and set the new one. */
     Jim_FreeIntRep(objPtr);
-    objPtr->typePtr = &indexObjType;
     objPtr->internalRep.intValue = idx;
+    SetTypePtr(objPtr, &indexObjType);
     return JIM_OK;
 
   badindex:
@@ -8246,8 +8264,8 @@ static int SetReturnCodeFromAnyUnshared(Jim_Interp *interp, Jim_Obj *objPtr)
     }
     /* Free the old internal repr and set the new one. */
     Jim_FreeIntRep(objPtr);
-    objPtr->typePtr = &returnCodeObjType;
     objPtr->internalRep.intValue = returnCode;
+    SetTypePtr(objPtr, &returnCodeObjType);
     return JIM_OK;
 }
 
@@ -16762,10 +16780,10 @@ int Jim_GetEnum(Jim_Interp *interp, Jim_Obj *objPtr,
   found:
         /* Record the match in the object */
         Jim_FreeIntRep(objPtr);
-        objPtr->typePtr = &getEnumObjType;
         objPtr->internalRep.ptrIntValue.ptr = (void *)tablePtr;
         objPtr->internalRep.ptrIntValue.int1 = flags;
         objPtr->internalRep.ptrIntValue.int2 = match;
+        SetTypePtr(objPtr, &getEnumObjType);
         /* Return the result */
         *indexPtr = match;
         return JIM_OK;

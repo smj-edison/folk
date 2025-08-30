@@ -181,8 +181,8 @@ typedef struct Statement {
 
     // Owned by the DB. clause cannot be mutated or invalidated while
     // rc > 0.
-    Jim_Obj* _Atomic jimClause;
-    Clause* _Atomic derivedTrieClause;
+    Jim_Obj* jimClause;
+    Clause* derivedTrieClause;
 
     // If the statement is removed, we wait keepMs milliseconds before
     // removing its child matches.
@@ -416,8 +416,8 @@ static StatementRef statementNew(Db* db, Jim_Obj* jimClause,
     // is 0 and we were the ones who made it alive
     Jim_IncrRefCount(jimClause);
 
-    atomic_store(&stmt->jimClause, jimClause);
-    atomic_store(&stmt->derivedTrieClause, derivedTrieClause);
+    stmt->jimClause = jimClause;
+    stmt->derivedTrieClause = derivedTrieClause;
     stmt->keepMs = keepMs;
 
     destructorSetInit(&stmt->destructorSet);

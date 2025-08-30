@@ -7,6 +7,8 @@
 #include "jimautoconf.h"
 #include "jim-subcmd.h"
 
+// !!! UNAUDITED FOR MULTITHREADING !!! //
+
 extern "C" { /* The whole file is essentially C */
 
 #define MK_PROPERTY_BINARY  'B'

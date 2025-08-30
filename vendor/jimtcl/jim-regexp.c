@@ -86,7 +86,7 @@ static regex_t *SetRegexpFromAnyUnshared(Jim_Interp *interp, Jim_Obj *objPtr, un
     int ret;
 
     /* Check if the object is already an uptodate variable */
-    if (objPtr->typePtr == &regexpObjType &&
+    if (atomic_load_explicit(&(objPtr->typePtr), memory_order_acquire) == &regexpObjType &&
         objPtr->internalRep.ptrIntValue.ptr && objPtr->internalRep.ptrIntValue.int1 == flags) {
         /* nothing to do */
         return objPtr->internalRep.ptrIntValue.ptr;
@@ -110,9 +110,9 @@ static regex_t *SetRegexpFromAnyUnshared(Jim_Interp *interp, Jim_Obj *objPtr, un
 
     Jim_FreeIntRep(objPtr);
 
-    objPtr->typePtr = &regexpObjType;
     objPtr->internalRep.ptrIntValue.int1 = flags;
     objPtr->internalRep.ptrIntValue.ptr = compre;
+    atomic_store_explicit(&(objPtr->typePtr), &regexpObjType, memory_order_release);
 
     return compre;
 }

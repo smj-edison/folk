@@ -7,6 +7,7 @@ $cc include <math.h>
 $cc include <common/matd.h>
 $cc include <common/homography.h>
 $cc include <assert.h>
+$cc include <stdatomic.h>
 
 $cc code {
     extern Jim_ObjType matd_ObjType;
@@ -35,7 +36,9 @@ $cc code {
         Jim_SetBytesOrFree(objPtr, s, strlen(s));
     }
     int matd_setFromAnyProc(Jim_Interp *interp, Jim_Obj *objPtr) {
-        if (objPtr->typePtr == &matd_ObjType) { return JIM_OK; }
+        if (atomic_load_explicit(&(objPtr->typePtr), memory_order_relaxed) == &matd_ObjType) {
+            return JIM_OK;
+        }
         assert(!Jim_IsShared(objPtr));
 
         // shimmer into a list, then iterate
@@ -58,8 +61,8 @@ $cc code {
                 __ENSURE_OK(Jim_GetDouble(interp, elObj, &MATD_EL(mat, row, col)));
             }
         }
-        objPtr->typePtr = &matd_ObjType;
         objPtr->internalRep.ptr = mat;
+        atomic_store_explicit(&(objPtr->typePtr), &matd_ObjType, memory_order_release);
         return JIM_OK;
     }
     Jim_ObjType matd_ObjType = (Jim_ObjType) {
@@ -81,9 +84,10 @@ $cc argtype matd_t* {
 }
 $cc rtype matd_t* {
     $robj = Jim_NewObj(interp, JIM_LIVE_LIST);
-    $robj->bytes = NULL;
-    $robj->typePtr = &matd_ObjType;
+    atomic_store_explicit(&($robj->bytes), NULL, memory_order_relaxed);
+
     $robj->internalRep.ptr = $rvalue;
+    atomic_store_explicit(&($robj->typePtr), &matd_ObjType, memory_order_release);
 }
 
 $cc proc computeNormalizer {int nPoints float points[][2]} matd_t* {

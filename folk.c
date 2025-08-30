@@ -34,7 +34,7 @@ ThreadControlBlock* getSelf() { return self; }
 struct mpmc_queue globalWorkQueue;
 _Atomic int globalWorkQueueSize;
 void globalWorkQueueInit() {
-    mpmc_queue_init(&globalWorkQueue, 16384, &memtype_heap);
+    mpmc_queue_init(&globalWorkQueue, 16384 * 8, &memtype_heap);
     globalWorkQueueSize = 0;
 }
 void traceItem(char* buf, size_t bufsz, WorkQueueItem item);
@@ -670,7 +670,7 @@ static void runWhenBlock(StatementRef whenRef, Jim_Obj* whenPattern, StatementRe
     Jim_Obj* whenClause = statementJimClause(when);
     Jim_Obj* stmtClause = stmt == NULL ? whenPattern : statementJimClause(stmt);
 
-    assert(whenClause->typePtr == Jim_ListType());
+    assert(Jim_ListType() == atomic_load_explicit(&(whenClause->typePtr), memory_order_relaxed));
     assert(Jim_ListLength(interp, whenClause) >= 5);
 
     Jim_Obj** whenClauseTerms = whenClause->internalRep.listValue.ele;

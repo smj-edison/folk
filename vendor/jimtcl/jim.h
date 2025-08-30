@@ -299,7 +299,7 @@ struct Jim_Interp;
 typedef struct Jim_Obj {
 #ifdef __cplusplus
     std::atomic<char *> bytes;
-    const std::atomic<Jim_ObjType *> typePtr;
+    const std::atomic<struct Jim_ObjType *> typePtr;
     std::atomic<int> refCount;
 #else
     char * _Atomic bytes; /* string representation buffer. NULL = no string repr. */
@@ -317,6 +317,8 @@ typedef struct Jim_Obj {
         int intValue;
         /* double number type */
         double doubleValue;
+        /* Generic pointer */
+        void *ptr;
         /* Generic two pointers value */
         struct {
             void *ptr1;
@@ -351,6 +353,12 @@ typedef struct Jim_Obj {
     union {
         /* Generic pointer */
         void *ptr;
+        /* Generic pointer, int, int value */
+        struct {
+            void *ptr;
+            int int1;
+            int int2;
+        } ptrIntValue;
         /* Variable object */
         struct {
             struct Jim_VarVal *vv;

@@ -41,6 +41,7 @@
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdatomic.h>
 
 #include <jim.h>
 #include <jimautoconf.h>
@@ -150,8 +151,8 @@ static int BinaryEncode64(Jim_Interp *interp, int objc, Jim_Obj *const objv[])
 	}
 
     resultObj = Jim_NewObj(interp, JIM_LIVE_LIST);
-    resultObj->typePtr = NULL;
-    
+    atomic_store_explicit(&(resultObj->typePtr), NULL, memory_order_relaxed);
+
 	unsigned char *cursor = NULL;
 
 	size = (((count * 4) / 3) + 3) & ~3;	/* ensure 4 byte chunks */
@@ -252,7 +253,7 @@ static int BinaryDecode64(Jim_Interp *interp, int objc, Jim_Obj *const objv[])
     }
 
     resultObj = Jim_NewObj(interp, JIM_LIVE_LIST);
-    resultObj->typePtr = NULL;
+    atomic_store_explicit(&(resultObj->typePtr), NULL, memory_order_relaxed);
     data = (unsigned char *)Jim_GetString(interp, objv[objc - 1], &count);
 
     datastart = data;
