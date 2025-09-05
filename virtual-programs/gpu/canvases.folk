@@ -286,6 +286,11 @@ When the GPU library is /gpuLib/ & the image library is /imageLib/ &\
         }
 
         Wish the GPU runs frame prelude handler [list apply {{gpuCanvasLib} {
+            tracy zoneBegin
+
+            upvar _frameTimestamp _frameTimestamp
+            set _frameTimestamp "none"
+
             upvar missingPipelines missingPipelines
             upvar mostRecentDrawListsByTexture mostRecentDrawListsByTexture
             if {![info exists missingCanvases]} {
@@ -374,15 +379,21 @@ When the GPU library is /gpuLib/ & the image library is /imageLib/ &\
                 }
 
                 set results [dict get $resultsStmt results]
-                foreach result $results { dict with result {
-                    try {
-                        renderPipeline $name $id $options
-                    } on error e {
-                        puts stderr "Error: GPU draws pipeline $name: [errorInfo $e]"
-                        Assert! $this claims $wisher has error $e with info [errorInfo $e]
-                        # TODO: does this ever get disposed?
+                foreach result $results {
+                    dict with result {
+                        if {[dict exists $options frameTimestamp]} {
+                            set _frameTimestamp [dict get $options frameTimestamp]
+                        }
+
+                        try {
+                            renderPipeline $name $id $options
+                        } on error e {
+                            puts stderr "Error: GPU draws pipeline $name: [errorInfo $e]"
+                            Assert! $this claims $wisher has error $e with info [errorInfo $e]
+                            # TODO: does this ever get disposed?
+                        }
                     }
-                } }
+                }
             }
 
             dict for {id drawLists} $drawListsByTexture {
@@ -409,6 +420,9 @@ When the GPU library is /gpuLib/ & the image library is /imageLib/ &\
             foreach ref $acquiredRefs {
                 StatementRelease! $ref
             }
+
+            tracy zoneName "canvas-drawing: $_frameTimestamp"
+            tracy zoneEnd
         }} $gpuCanvasLib]
     }
 

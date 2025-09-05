@@ -1387,12 +1387,14 @@ When' /someone/ wishes $::thisNode uses display /displayIdx/ &\
 
     set missingPipelines [dict create]
     while true {
+        set _frameTimestamp "none"
+
         ForEach! /someone/ wishes the GPU runs frame prelude handler /hd/ {
             {*}$hd
         }
 
         tracy zoneBegin
-        tracy zoneName "gpu-draw-start"
+        tracy zoneName "gpu-draw-start: $_frameTimestamp"
         $gpu drawStart
         tracy zoneEnd
 

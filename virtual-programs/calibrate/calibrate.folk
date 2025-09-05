@@ -236,6 +236,7 @@ When camera /camera/ has width /cameraWidth/ height /cameraHeight/ &\
              with /...modelToDisplayOpts/ &\
          the calibration poses are /calibrationPoses/ &\
          the calibration cycle time is /cycleTime/ {
+        tracy zoneBegin
 
         package require linalg
         namespace import ::math::linearalgebra::scale \
@@ -243,6 +244,8 @@ When camera /camera/ has width /cameraWidth/ height /cameraHeight/ &\
             ::math::linearalgebra::norm
 
         set model [dict get $modelToDisplayOpts model]
+        set frameTimestamp [dict get $modelToDisplayOpts frameTimestamp]
+        tracy zoneName "layout-calibration-tags: $frameTimestamp"
 
         set bgColor [list 1 1 1 1]
 
@@ -269,7 +272,7 @@ When camera /camera/ has width /cameraWidth/ height /cameraHeight/ &\
             }]
             Wish to draw an AprilTag onto $board with \
                 id $id corners $displayOuterCorners background $bgColor \
-                layer 100
+                layer 100 frameTimestamp $frameTimestamp
         }
 
         # White backdrop across whole projector area to hopefully make
@@ -330,6 +333,7 @@ When camera /camera/ has width /cameraWidth/ height /cameraHeight/ &\
                  [dict get $wiOpts texture] \
                  [list -1 -1] [list 1 -1] [list 1 1] [list -1 1]] \
             layer 100
+        tracy zoneEnd
     }
 
     # This is made a function so it can also be called by the Web page
@@ -367,12 +371,17 @@ When camera /camera/ has width /cameraWidth/ height /cameraHeight/ &\
     }
 
     When (serially) camera $camera has frame /frame/ at timestamp /frameTimestamp/ {
+        tracy zoneBegin
+        tracy zoneName "calibration-step: $frameTimestamp"
+
         # HACK: so we just lookup whatever is latest _right now_,
         # instead of subscribing.
         set calibrationStates \
             [Query! the calibration model-to-display homography is /H_modelToDisplay/ with \
                  /...modelToDisplayOpts/]
         if {[llength $calibrationStates] == 0} {
+            tracy message "Ended early: no calibration states"
+            tracy zoneEnd
             return
         }
         # Sort in ascending order to find the newest (highest frameTimestamp) model.
@@ -389,6 +398,8 @@ When camera /camera/ has width /cameraWidth/ height /cameraHeight/ &\
         if {$modelFrameTimestamp >= $frameTimestamp} {
             # This is an old homography. This seems to only happen on
             # slider manual size adjust.
+            tracy message "Ended early: old homography"
+            tracy zoneEnd
             return
         }
 
@@ -409,7 +420,11 @@ When camera /camera/ has width /cameraWidth/ height /cameraHeight/ &\
             dict set allDetectedTags $id $tag
             if {[isPrintedTag $id]} { dict set printedTags $id $tag }
         }
-        if {[dict size $printedTags] == 0} { return }
+        if {[dict size $printedTags] == 0} { 
+            tracy message "Ended early: no detected tags"
+            tracy zoneEnd
+            return
+        }
 
         set printedPointPairs [list]
         dict for {id printedTag} $printedTags {
@@ -454,7 +469,11 @@ When camera /camera/ has width /cameraWidth/ height /cameraHeight/ &\
                 dict set projectedTags $id $tag
             }
         }
-        if {[dict size $projectedTags] == 0} { return }
+        if {[dict size $projectedTags] == 0} {
+            tracy message "Ended early: no tags to project"
+            tracy zoneEnd
+            return
+        }
 
         # Check the rotation of a version tag to figure out the
         # version of what the camera saw, unless it's version -1.
@@ -467,7 +486,11 @@ When camera /camera/ has width /cameraWidth/ height /cameraHeight/ &\
                     break
                 }
             }
-            if {![info exists versionTagId]} { return }
+            if {![info exists versionTagId]} {
+                tracy message "Ended early: no projected tags detected"
+                tracy zoneEnd
+                return
+            }
 
             set getTagAngle {{tag} {
                 set p [dict get $tag p]
@@ -477,14 +500,22 @@ When camera /camera/ has width /cameraWidth/ height /cameraHeight/ &\
             set versionTagAngle [apply $getTagAngle [dict get $projectedTags $versionTagId]]
 
             # Compare angle to angle of any other projected tag.
-            if {[dict size $projectedTags] < 2} { return }
+            if {[dict size $projectedTags] < 2} {
+                tracy message "Ended early: too few projected tags"
+                tracy zoneEnd
+                return
+            }
             dict for {id projectedTag} $projectedTags {
                 if {![isVersionTag $id]} {
                     set otherTagAngle [apply $getTagAngle $projectedTag]
                     break
                 }
             }
-            if {![info exists otherTagAngle]} { return }
+            if {![info exists otherTagAngle]} {
+                tracy message "Ended early: no otherTagAngle"
+                tracy zoneEnd
+                return
+            }
 
             set versionAngle [expr {$versionTagAngle - $otherTagAngle}]
             # Rotations corresponding to versions 0, 1, 2, 3:
@@ -502,6 +533,8 @@ When camera /camera/ has width /cameraWidth/ height /cameraHeight/ &\
             # then we should abort and wait until a later frame.
             set expectedVersion [expr {$version % 4}]
             if {$detectedVersion != $expectedVersion} {
+                tracy message "Ended early: wrong version detected"
+                tracy zoneEnd
                 return
             }
         }
@@ -523,6 +556,8 @@ When camera /camera/ has width /cameraWidth/ height /cameraHeight/ &\
             # (https://stackoverflow.com/questions/10972438/detecting-garbage-homographies-from-findhomography-in-opencv).
             # It's sort of 'overfitted' and just has a big y-intercept
             # and will break everything if we let it through. Skip.
+            tracy message "Ended early: garbage homography"
+            tracy zoneEnd
             return
         }
 
@@ -550,6 +585,8 @@ When camera /camera/ has width /cameraWidth/ height /cameraHeight/ &\
         # We want to be seeing at least 50% of printed and projected tags.
         if {[dict size $printedTags] < $COLS + $ROWS ||
             [dict size $projectedTags] < $COLS - 2} {
+            tracy message "Ended early: too few projected and printed tags detected"
+            tracy zoneEnd
             return
         }
 
@@ -573,6 +610,8 @@ When camera /camera/ has width /cameraWidth/ height /cameraHeight/ &\
         set poseRmse [expr {sqrt($totalError / ([llength $projectedTags] * 4))}]
         if {$poseRmse > 5} {
             puts "Pose has too-high rmse ($poseRmse); skipping"
+            tracy message "Ended early: too high pose rmse ($poseRmse)"
+            tracy zoneEnd
             return
         }
 
@@ -600,6 +639,8 @@ When camera /camera/ has width /cameraWidth/ height /cameraHeight/ &\
         # stable in the last few frames.
 
         if {[llength $seenPoses] < 3} {
+            tracy message "Ended early: too few stable frames to record"
+            tracy zoneEnd
             return
         }
 
@@ -610,6 +651,8 @@ When camera /camera/ has width /cameraWidth/ height /cameraHeight/ &\
             # Decreasing this threshold to 1 helps with data
             # accuracy. TODO: Use an _older_ frame?
             if {[meanPoseDifference $pose $seenPose] > 5} {
+                tracy message "Ended early: current frame too unstable to record pose"
+                tracy zoneEnd
                 return
             }
         }
@@ -623,6 +666,8 @@ When camera /camera/ has width /cameraWidth/ height /cameraHeight/ &\
         if {[llength $calibrationPoses] > 0} {
             set prevCalibrationPose [lindex $calibrationPoses end]
             if {[meanPoseDifference $pose $prevCalibrationPose] < 50} {
+                tracy message "Ended early: too close to last recorded pose"
+                tracy zoneEnd
                 return
             }
         }
@@ -656,6 +701,9 @@ When camera /camera/ has width /cameraWidth/ height /cameraHeight/ &\
 
             Retract! /someone/ wishes to calibrate
         }
+
+        tracy message "Recorded pose"
+        tracy zoneEnd
     }
 }
 
