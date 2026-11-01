@@ -46,13 +46,13 @@ void tfree(void *ptr) {
 
 #endif
 
-        static void trieRetireValue(Zicl_Obj* obj) {
+        static void trieRetireObj(Zicl_Obj* obj) {
             Zicl_DropRef(Zicl_BoxObject(obj));
         }
         static const TrieAllocator trieAllocator = {
             .alloc = tmalloc,
             .retire = tfree,
-            .retireValue = trieRetireValue,
+            .retireObj = trieRetireObj,
         };
 
         static Zicl_List* valueToClause(Zicl_Interp* interp, Zicl_Val clauseObj) {

@@ -220,15 +220,15 @@ fn quadLib::createFromGeometry {q geom} {
     return [quadLib::create [quadLib::space $q] [list $topLeft $topRight $bottomRight $bottomLeft]]
 }
 
-proc quadLib::xyToPoint {quad xy} {
+fn quadLib::xyToPoint {quad xy} {
     lassign $xy x y
     lassign [quadLib::vertices $quad] topLeft topRight bottomRight bottomLeft
     set width [norm [sub $topRight $topLeft]]
     set height [norm [sub $bottomLeft $topLeft]]
     set xAxis [unitLengthVector [sub $topRight $topLeft]]
     set yAxis [unitLengthVector [sub $bottomLeft $topLeft]]
-    set pointRelativeToTopLeft [add [scaleVector $x $xAxis] \
-                                    [scaleVector $y $yAxis]]
+    set pointRelativeToTopLeft [add [scale $x $xAxis] \
+                                    [scale $y $yAxis]]
     return [add $pointRelativeToTopLeft $topLeft]
 }
 

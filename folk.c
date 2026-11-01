@@ -23,7 +23,7 @@
 
 #include "vendor/c11-queues/mpmc_queue.h"
 
-#include "folk-zicl.h"
+#include "zicl-helpers.h"
 #include "epoch.h"
 #include "db.h"
 #include "common.h"
@@ -288,12 +288,9 @@ static int HoldStatementGloballyFunc(Zicl_Interp *interp, int argc, Zicl_Shim *a
     return ZICL_OK;
 }
 
-/* Takes ownership of `clause`. */
-static StatementRef Say(Zicl_List* clause, long keepMs,
-                        AtomicallyVersion* const* atomicallyVersions,
-                        int atomicallyVersionsCount,
-                        Zicl_OptVal destructorCode,
-                        const char *sourceFileName, int sourceLineNumber) {
+/* Takes ownership of `clause` and `ctx.otherAttributes` (if non-NULL). */
+static StatementRef Say(Zicl_List* clause, Zicl_OptVal destructorCode,
+                        StatementContext ctx) {
     MatchRef parent;
     if (self->currentMatch) {
         parent = matchRef(db, self->currentMatch);
@@ -305,10 +302,7 @@ static StatementRef Say(Zicl_List* clause, long keepMs,
     }
 
     Statement* stmt;
-    stmt = dbInsertOrReuseStatement(db, clause,
-                                    keepMs, atomicallyVersions, atomicallyVersionsCount,
-                                    sourceFileName, sourceLineNumber,
-                                    parent, NULL);
+    stmt = dbInsertOrReuseStatement(db, clause, ctx, parent, NULL);
 
     Destructor* destructor = NULL;
     if (Zicl_IsSome(destructorCode)) {
@@ -339,53 +333,73 @@ static StatementRef Say(Zicl_List* clause, long keepMs,
 }
 
 static int SayWithSourceFunc(Zicl_Interp *interp, int argc, Zicl_Shim *argv) {
-    assert(argc >= 7);
-    Zicl_List* clause = ziclNewListFromShims(argv + 6, argc - 6);
-    AtomicallyVersion** atomicallyVersions = NULL;
-
-    const char* sourceFileName = ziclShimString(&argv[1]);
+    assert(argc >= 2);
+    if (self->inSubscription) {
+        return Zicl_SetErrorString(interp, "Cannot call Say within Subscribe", -1);
+    }
 
     int rc = ZICL_OK;
-    long sourceLineNumber; ZICL_TRY(Zicl_GetLong(interp, &argv[2], &sourceLineNumber), rc);
-    long keepMs; ZICL_TRY(Zicl_GetLong(interp, &argv[3], &keepMs), rc);
+    Zicl_Dict* attributes; ZICL_TRY(Zicl_DupAsFlattenedDict(interp, &argv[1], &attributes), rc);
+    defer { if (attributes != NULL) Zicl_DropRefDict(attributes); }
 
-    const Zicl_List *versions_list; ZICL_TRY(Zicl_ShimmerToList(interp, &argv[4], &versions_list), rc);
-    int atomicallyVersionsCount = Zicl_ListLength(versions_list);
-    const Zicl_Val *versions = Zicl_ListItems(versions_list);
-    atomicallyVersions = atomicallyVersionsCount == 0 ? NULL :
-        malloc(sizeof(AtomicallyVersion*) * atomicallyVersionsCount);
-    for (int i = 0; i < atomicallyVersionsCount; i++) {
-        void* version = NULL;
-        if (sscanf(ziclString(versions[i]),
-                   "(AtomicallyVersion*) %p", &version) != 1 || version == NULL) {
-            Zicl_SetResultString(interp, "Invalid atomic version", -1);
-            goto err;
+    AtomicallyVersion** atomicallyVersions = NULL;
+    // Always freed, since `ctx` doesn't take ownership of `atomicallyVersions`.
+    defer { free(atomicallyVersions); }
+
+    StatementContext ctx = {
+        .keepMs = 0,
+        .atomicallyVersions = NULL,
+        .atomicallyVersionsCount = 0,
+        .sourceFileName = "<unknown>",
+        .sourceLineNumber = -1,
+        .otherAttributes = NULL,
+    };
+
+    ziclDictGetStringNoFollow(attributes, "sourceFileName", &ctx.sourceFileName);
+    ZICL_TRY(ziclDictGetIntNoFollow(interp, attributes, "sourceLineNumber", &ctx.sourceLineNumber), rc);
+    ZICL_TRY(ziclDictGetLongNoFollow(interp, attributes, "keepMs", &ctx.keepMs), rc);
+
+    Zicl_OptVal atomicallyVersionVal = ziclDictGetNoFollow(attributes, "atomicallyVersion");
+    if (Zicl_IsSome(atomicallyVersionVal)) {
+        Zicl_Shim shim = Zicl_NewShim(Zicl_Unwrap(atomicallyVersionVal));
+        defer { Zicl_ShimDiscardChanges(&shim); }
+        const Zicl_List *versionsList;
+        ZICL_TRY(Zicl_ShimmerToList(interp, &shim, &versionsList), rc);
+
+        int count = Zicl_ListLength(versionsList);
+        const Zicl_Val *versions = Zicl_ListItems(versionsList);
+
+        atomicallyVersions = count == 0 ? NULL : malloc(sizeof(AtomicallyVersion*) * count);
+        for (int i = 0; i < count; i++) {
+            void* version = NULL;
+            if (sscanf(ziclString(versions[i]),
+                       "(AtomicallyVersion*) %p", &version) != 1 || version == NULL) {
+                return Zicl_SetErrorString(interp, "Invalid AtomicallyVersion*", -1);
+            }
+            atomicallyVersions[i] = version;
         }
-        atomicallyVersions[i] = version;
+        ctx.atomicallyVersions = atomicallyVersions;
+        ctx.atomicallyVersionsCount = count;
     }
 
-    Zicl_Val destructorCodeValue = Zicl_Current(&argv[5]);
-    int destructorCodeLen; Zicl_GetString(destructorCodeValue, &destructorCodeLen);
     Zicl_OptVal destructorCodePassedIn = ZICL_NONE;
-    if (destructorCodeLen > 0) {
-        destructorCodePassedIn = Zicl_Wrap(destructorCodeValue);
+    const char *destructorCodeStr;
+    if (ziclDictGetStringNoFollow(attributes, "destructorCode", &destructorCodeStr) && destructorCodeStr[0] != '\0') {
+        destructorCodePassedIn = ziclDictGetNoFollow(attributes, "destructorCode");
     }
 
-    if (self->inSubscription) {
-        Zicl_SetResultString(interp, "Cannot call Say within Subscribe", -1);
-        return (rc = ZICL_ERR);
-    }
+    ziclDictRemove(attributes, "sourceFileName");
+    ziclDictRemove(attributes, "sourceLineNumber");
+    ziclDictRemove(attributes, "keepMs");
+    ziclDictRemove(attributes, "atomicallyVersion");
+    ziclDictRemove(attributes, "destructorCode");
 
-    Say(clause, keepMs, atomicallyVersions, atomicallyVersionsCount,
-        destructorCodePassedIn,
-        sourceFileName, (int) sourceLineNumber);
-    free(atomicallyVersions);
+    ctx.otherAttributes = attributes;
+    attributes = NULL;
+
+    Zicl_List* clause = ziclNewListFromShims(argv + 2, argc - 2);
+    Say(clause, destructorCodePassedIn, ctx);
     return ZICL_OK;
-
- err:
-    free(atomicallyVersions);
-    clauseFree(clause);
-    return ZICL_ERR;
 }
 
 static int DestructorFunc(Zicl_Interp *interp, int argc, Zicl_Shim *argv) {
@@ -435,6 +449,7 @@ Zicl_List* QuerySimple(bool isAtomically, Zicl_List* pattern) {
         }
         defer {
             for (int j = 0; j < env->nBindings; j++) Zicl_DropRef(env->bindings[j].value);
+            free(env);
         }
 
         Zicl_Dict* envDict = ziclNewDict(NULL, 0);
@@ -448,8 +463,6 @@ Zicl_List* QuerySimple(bool isAtomically, Zicl_List* pattern) {
         statementRelease(db, result);
 
         ziclListAppend(ret, Zicl_BoxDict(envDict));
-
-        free(env);
     }
 
     free(rs);
@@ -627,9 +640,9 @@ static int __dbFunc(Zicl_Interp *interp, int argc, Zicl_Shim *argv) {
     char ret[100]; snprintf(ret, 100, "(Db*) %p", db);
     return Zicl_SetResultString(interp, ret, strlen(ret));
 }
-static int __threadIdFunc(Jim_Interp *interp, int argc, Jim_Obj *const *argv) {
-    Jim_SetResultInt(interp, self->index);
-    return JIM_OK;
+static int __threadIdFunc(Zicl_Interp *interp, int argc, Zicl_Shim *argv) {
+    assert(argc == 1);
+    return Zicl_SetResultLong(interp, self->index);
 }
 
 static int __currentAtomicallyVersionFunc(Zicl_Interp *interp, int argc, Zicl_Shim *argv) {
@@ -730,8 +743,8 @@ static void interpBoot() {
 
     Zicl_CreateCommand(
         interp, "SayWithSource", SayWithSourceFunc,
-        "keepMs version destructorCode sourceFileName sourceLineNumber clause",
-        6, -1
+        "attributes ?term ...?",
+        1, -1
     );
     Zicl_CreateCommand(interp, "Destructor", DestructorFunc, "destructor", 1, 1);
 
@@ -844,7 +857,11 @@ static void runBlockReportError(Zicl_Val thisValue, const char* sourceFileName, 
         HoldStatementGlobally(ziclListString(keyList), -1, errorClause, 0, ZICL_NONE,
                               sourceFileName, sourceLineNumber);
     } else {
-        Say(errorClause, 0, NULL, ZICL_NONE, sourceFileName, sourceLineNumber);
+        StatementContext ctx = {
+            .sourceFileName = sourceFileName,
+            .sourceLineNumber = sourceLineNumber,
+        };
+        Say(errorClause, ZICL_NONE, ctx);
     }
 }
 
@@ -943,23 +960,10 @@ static void runWhenBlock(StatementRef whenRef, Zicl_List* whenPattern, Statement
     // Now when is definitely non-null and stmt is non-null if
     // applicable.
 
-    Clause* whenClause = statementClause(when);
-    Clause* stmtClause = stmt == NULL ? whenPattern : statementClause(stmt);
-
-    assert(whenClause->nTerms >= 5);
-    const Term* body = whenClause->terms[whenClause->nTerms - 4];
-    const Term* capturedEnvStack = whenClause->terms[whenClause->nTerms - 1];
-    Jim_Obj* envStackObj = termToJimObj(interp, capturedEnvStack);
-
-    // If the last frame in envStackObj is {__atomicallyKey KEY}, then
-    // it's a metadata frame that is telling us to make a fresh
-    // AtomicallyVersion on KEY, and we should consume that metadata
-    // frame before attaching the match or evaluating Tcl. An optional third
-    // element specifies the timeout in nanoseconds.
-    //
-    // If applicable, we need to create the fresh AtomicallyVersion
-    // before Tcl starts evaluation, so we need to get the Atomically
-    // for it here.
+    // If the when statement has `atomicallyKey` in its otherAttributes,
+    // we need to make a fresh AtomicallyVersion on that key before
+    // attaching the match or evaluating Tcl. An optional `atomicTimeout`
+    // specifies the timeout in nanoseconds.
     //
     // (Why? Why not create the AtomicallyVersion inside Tcl, in the
     // evaluated block? If you do that, then there is a risk that
@@ -975,41 +979,18 @@ static void runWhenBlock(StatementRef whenRef, Zicl_List* whenPattern, Statement
     // will be preserved because it's already been made an Atomically
     // root.)
     Atomically* freshAtomically = NULL;
-    int nFrames = Jim_ListLength(interp, envStackObj);
-    Jim_Obj* metadata = nFrames > 0 ? Jim_ListGetIndex(interp, envStackObj, nFrames - 1) : NULL;
-    int metadataLen = metadata == NULL ? 0 : Jim_ListLength(interp, metadata);
-    if ((metadataLen == 2 || metadataLen == 3) &&
-        strcmp(Jim_String(Jim_ListGetIndex(interp, metadata, 0)), "__atomicallyKey") == 0) {
-        jim_wide timeout = 100000000; // 100ms unless When supplies -keep.
-        if (metadataLen == 3) {
-            Jim_GetWide(interp, Jim_ListGetIndex(interp, metadata, 2), &timeout);
+    Zicl_Dict* otherAttrs = statementOtherAttributes(when);
+    if (otherAttrs != NULL) {
+        const char* atomicallyKey;
+        if (ziclDictGetStringNoFollow(otherAttrs, "atomicallyKey", &atomicallyKey)) {
+            long timeout = 100000000; // 100ms unless When supplies -keep.
+            folkZiclAssert(ziclDictGetLongNoFollow(interp, otherAttrs, "atomicTimeout", &timeout));
+            freshAtomically = dbGetOrCreateAtomically(db, atomicallyKey, timeout);
         }
-        freshAtomically = dbGetOrCreateAtomically(db,
-            Jim_String(Jim_ListGetIndex(interp, metadata, 1)), timeout);
-        Jim_Obj* lexicalEnv = Jim_NewListObj(interp, NULL, 0);
-        for (int i = 0; i < nFrames - 1; i++) {
-            Jim_ListAppendElement(interp, lexicalEnv, Jim_ListGetIndex(interp, envStackObj, i));
-        }
-        Jim_DecrRefCount(interp, envStackObj);
-        envStackObj = lexicalEnv;
     }
 
     if (stmt != NULL) {
         StatementRef parents[] = { whenRef, stmtRef };
-
-        AtomicallyVersion* whenAtomicallyVersion = statementAtomicallyVersion(when);
-        AtomicallyVersion* stmtAtomicallyVersion = statementAtomicallyVersion(stmt);
-        AtomicallyVersion* atomicallyVersion = NULL;
-        if (whenAtomicallyVersion && stmtAtomicallyVersion &&
-            whenAtomicallyVersion != stmtAtomicallyVersion) {
-            fprintf(stderr, "runWhenBlock: Warning: Conflicting atomicallyVersion between:\n"
-                    "  when (%p): (%.150s)\n"
-                    "  stmt (%p): (%.150s)\n",
-                    whenAtomicallyVersion, ziclListString(statementClause(when)),
-                    stmtAtomicallyVersion, ziclListString(statementClause(stmt)));
-        }
-        atomicallyVersion = stmtAtomicallyVersion ?
-            stmtAtomicallyVersion : whenAtomicallyVersion;
         self->currentMatch = dbInsertMatch(db, 2, parents,
                                            freshAtomically, self->index);
     } else {
@@ -1025,9 +1006,6 @@ static void runWhenBlock(StatementRef whenRef, Zicl_List* whenPattern, Statement
     // check if match failed to be created
     if (!self->currentMatch) {
         // A parent is gone. Abort.
-        if (self->currentAtomicallyVersion != NULL) {
-            dbAtomicallyVersionInflightDecr(db, self->currentAtomicallyVersion);
-        }
         return;
     }
 
@@ -1427,10 +1405,11 @@ void workerRun(WorkQueueItem item) {
         /* printf("Assert (%s)\n", clauseToString(item.assert.clause)); */
 
         Statement* stmt;
-        stmt = dbInsertOrReuseStatement(db, item.assert.clause,
-                                        0, NULL, 0,
-                                        item.assert.sourceFileName,
-                                        item.assert.sourceLineNumber,
+        StatementContext ctx = {
+            .sourceFileName = item.assert.sourceFileName,
+            .sourceLineNumber = item.assert.sourceLineNumber,
+        };
+        stmt = dbInsertOrReuseStatement(db, item.assert.clause, ctx,
                                         MATCH_REF_NULL, NULL);
         if (stmt != NULL) {
             StatementRef ref = statementRef(db, stmt);

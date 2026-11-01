@@ -68,7 +68,7 @@ cc::addcode {
 cc::proc init {} void {
     pthread_mutex_init(&collectsMutex, NULL);
 }
-cc::proc Recollect! {Zicl_Val patternObj bool isAtomically} void {
+cc::proc Recollect! {Zicl_Val patternObj bool isAtomically} bool {
     // First, query for collect patterns.
     Zicl_Val collectorTerms[10];
     collectorTerms[0] = ziclNewString("/someone/", -1);
@@ -154,9 +154,9 @@ cc::proc Recollect! {Zicl_Val patternObj bool isAtomically} void {
         if (!allConverged) {
             for (int i = 0; i < resultStmtsCount; i++) statementRelease(db, resultStmts[i]);
             free(resultStmts);
-            Jim_DecrRefCount(interp, resultsObj);
+            Zicl_DropRefList(resultsList);
             free(collectKey);
-            clauseFree(collectorPattern);
+            Zicl_DropRefList(collectorPattern);
             free(collectorsSet);
             return false;
         }
@@ -255,7 +255,7 @@ cc::proc RunScheduledRecollects! {} void {
         if (collects[i].patternStr != NULL &&
             collects[i].collectAtTime <= now) {
             
-            Zicl_Val to_recollect = ziclNewString(interp, collects[i].patternStr, -1);
+            Zicl_Val to_recollect = ziclNewString(collects[i].patternStr, -1);
             if (Recollect_(to_recollect, true)) {
                 free(collects[i].patternStr);
                 collects[i].patternStr = NULL;

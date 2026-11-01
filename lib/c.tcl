@@ -97,7 +97,6 @@ fn foreachZiclValueField {fields structExpr opTemplate} {
 set C {
     compiler cc
     prelude {
-        #include <libzicl.h>
         #include <inttypes.h>
         #include <stdint.h>
         #include <stdbool.h>
@@ -106,7 +105,8 @@ set C {
         #include <stddef.h>
         #include <string.h>
         #include <setjmp.h>
-        #include "folk-zicl.h"
+        #include <libzicl.h>
+        #include "zicl-helpers.h"
 
         #if __has_include ("tracy/TracyC.h")
         #include "tracy/TracyC.h"
@@ -145,12 +145,12 @@ set C {
         # to a C function as an argument.
     }
     argtypes {
-        int { identity { long _$argname; __ENSURE_OK(Zicl_GetLong(interp, $shim, &_$argname)); int $argname = (int)_$argname; }}
-        double { identity { double $argname; __ENSURE_OK(Zicl_GetDouble(interp, $shim, &$argname)); }}
-        float { identity { double _$argname; __ENSURE_OK(Zicl_GetDouble(interp, $shim, &_$argname)); float $argname = (float)_$argname; }}
-        bool { identity { int _$argname; __ENSURE_OK(Zicl_GetBoolean(interp, $shim, &_$argname)); bool $argname = !!_$argname; }}
-        int32_t { identity { long _$argname; __ENSURE_OK(Zicl_GetLong(interp, $shim, &_$argname)); int32_t $argname = (int)_$argname; }}
-        char { identity {
+        int {identity { long _$argname; __ENSURE_OK(Zicl_GetLong(interp, $shim, &_$argname)); int $argname = (int)_$argname; }}
+        double {identity { double $argname; __ENSURE_OK(Zicl_GetDouble(interp, $shim, &$argname)); }}
+        float {identity { double _$argname; __ENSURE_OK(Zicl_GetDouble(interp, $shim, &_$argname)); float $argname = (float)_$argname; }}
+        bool {identity { int _$argname; __ENSURE_OK(Zicl_GetBoolean(interp, $shim, &_$argname)); bool $argname = !!_$argname; }}
+        int32_t {identity { long _$argname; __ENSURE_OK(Zicl_GetLong(interp, $shim, &_$argname)); int32_t $argname = (int)_$argname; }}
+        char {identity {
             char $argname;
             {
                 int _len_$argname;
@@ -159,14 +159,14 @@ set C {
                 $argname = _tmp_$argname[0];
             }
         }}
-        size_t { identity { size_t $argname; __ENSURE_OK(Zicl_GetLong(interp, $shim, (long *)&$argname)); }}
-        intptr_t { identity { intptr_t $argname; __ENSURE_OK(Zicl_GetLong(interp, $shim, (long *)&$argname)); }}
-        uint16_t { identity { uint16_t $argname; { long _wide_$argname; __ENSURE_OK(Zicl_GetLong(interp, $shim, &_wide_$argname)); $argname = (uint16_t)_wide_$argname; } }}
-        uint32_t { identity { uint32_t $argname; { long _wide_$argname; __ENSURE_OK(Zicl_GetLong(interp, $shim, &_wide_$argname)); $argname = (uint32_t)_wide_$argname; } }}
-        uint64_t { identity { uint64_t $argname; __ENSURE(sscanf(ziclShimString($shim), "%" PRIu64, &$argname) == 1); }}
-        char* { identity { char* $argname = (char*) ziclShimString($shim); } }
-        Zicl_Val { identity { Zicl_Val $argname = Zicl_Current($shim); }}
-        Zicl_Shim* { identity { Zicl_Shim* $argname = $shim; }}
+        size_t {identity { size_t $argname; __ENSURE_OK(Zicl_GetLong(interp, $shim, (long *)&$argname)); }}
+        intptr_t {identity { intptr_t $argname; __ENSURE_OK(Zicl_GetLong(interp, $shim, (long *)&$argname)); }}
+        uint16_t {identity { uint16_t $argname; { long _wide_$argname; __ENSURE_OK(Zicl_GetLong(interp, $shim, &_wide_$argname)); $argname = (uint16_t)_wide_$argname; } }}
+        uint32_t {identity { uint32_t $argname; { long _wide_$argname; __ENSURE_OK(Zicl_GetLong(interp, $shim, &_wide_$argname)); $argname = (uint32_t)_wide_$argname; } }}
+        uint64_t {identity { uint64_t $argname; __ENSURE(sscanf(ziclShimString($shim), "%" PRIu64, &$argname) == 1); }}
+        char* {identity { char* $argname = (char*) ziclShimString($shim); } }
+        Zicl_Val {identity { Zicl_Val $argname = Zicl_Current($shim); }}
+        Zicl_Shim* {identity { Zicl_Shim* $argname = $shim; }}
         default {
             if {[string index $argtype end] eq "*"} {
                 identity {
@@ -176,7 +176,7 @@ set C {
                 }
             } elseif {[regexp {(^[^\[]+)\[([^\]]*)\]$} $argtype -> basetype arraylen]} {
                 # note: arraylen can be "" or a named identifier
-                if {$basetype eq "char"} { identity {
+                if {$basetype eq "char"} {identity {
                     int $[set argname]_len; const char *$[set argname]_bytes = ziclShimString($shim, &len);
                     if ($[set argname]_len > $arraylen) $[set argname]_len = $arraylen;
                     char $argname[$arraylen]; memcpy($argname, $[set argname]_bytes, $[set argname]_len);
@@ -234,27 +234,27 @@ set C {
         # C function to Tcl.
     }
     rtypes {
-        int { identity { $robj = Zicl_NewLong($rvalue); }}
-        int32_t { identity { $robj = Zicl_NewLong($rvalue); }}
-        double { identity { $robj = Zicl_NewLong($rvalue); }}
-        float { identity { $robj = Zicl_NewLong($rvalue); }}
-        char { identity { $robj = ziclNewString(&$rvalue, 1); }}
-        bool { identity { $robj = Zicl_NewBool($rvalue); }}
-        uint8_t { identity { $robj = Zicl_NewLong($rvalue); }}
-        uint16_t { identity { $robj = Zicl_NewLong($rvalue); }}
-        uint32_t { identity { $robj = Zicl_NewLong($rvalue); }}
-        uint64_t { identity { $robj = Zicl_NewLong((uint64_t)($rvalue)); }}
-        size_t { identity { $robj = Zicl_NewLong($rvalue); }}
-        intptr_t { identity { $robj = Zicl_NewLong($rvalue); }}
-        char* { identity { $robj = ziclNewString($rvalue, -1); } }
-        Zicl_Val { identity { $robj = $rvalue; }}
+        int {identity { $robj = Zicl_NewLong($rvalue); }}
+        int32_t {identity { $robj = Zicl_NewLong($rvalue); }}
+        double {identity { $robj = Zicl_NewLong($rvalue); }}
+        float {identity { $robj = Zicl_NewLong($rvalue); }}
+        char {identity { $robj = ziclNewString(&$rvalue, 1); }}
+        bool {identity { $robj = Zicl_NewBool($rvalue); }}
+        uint8_t {identity { $robj = Zicl_NewLong($rvalue); }}
+        uint16_t {identity { $robj = Zicl_NewLong($rvalue); }}
+        uint32_t {identity { $robj = Zicl_NewLong($rvalue); }}
+        uint64_t {identity { $robj = Zicl_NewLong((uint64_t)($rvalue)); }}
+        size_t {identity { $robj = Zicl_NewLong($rvalue); }}
+        intptr_t {identity { $robj = Zicl_NewLong($rvalue); }}
+        char* {identity { $robj = ziclNewString($rvalue, -1); } }
+        Zicl_Val {identity { $robj = $rvalue; }}
         default {
             if {[string index $rtype end] eq "*"} {
                 identity { folkZiclAssert(Zicl_NewStringFormatted(&$robj, "($rtype) 0x%" PRIxPTR, (uintptr_t) $rvalue)); }
             } elseif {[regexp {(^[^\[]+)\[(\d*)\]$} $rtype -> basetype arraylen]} {
-                if {$basetype eq "char"} { identity {
+                if {$basetype eq "char"} {identity {
                     $robj = ziclValuePrintf($rvalue);
-                } } else { identity {
+                } } else {identity {
                     {
                         Zicl_Val objv[$arraylen];
                         for (int i = 0; i < $arraylen; i++) {

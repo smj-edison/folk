@@ -17,7 +17,7 @@
 #endif
 
 #include "common.h"
-#include "folk-zicl.h"
+#include "zicl-helpers.h"
 #include "trie.h"
 #include "epoch.h"
 #include "sysmon.h"
@@ -25,11 +25,11 @@
 
 #include "vendor/stb_ds.h"
 
-static void epochDecrRefWrapper(Zicl_Obj* value) { epochDecrRef(value); }
+static void epochDecrRefWrapper(Zicl_Obj* obj) { epochDecrRef(obj); }
 static const TrieAllocator epochAllocator = {
     .alloc = epochAlloc,
     .retire = epochFree,
-    .retireValue = epochDecrRefWrapper,
+    .retireObj = epochDecrRefWrapper,
 };
 
 typedef struct ListOfEdgeTo {
@@ -224,6 +224,9 @@ typedef struct Statement {
     // Used for debugging (and stack traces for When bodies).
     char sourceFileName[100];
     int sourceLineNumber;
+
+    // Additional attributes attached to the statement (crossthread Zicl_Dict, or NULL).
+    Zicl_Dict* otherAttributes;
 
     // Mutable statement properties:
     // -----
@@ -511,21 +514,19 @@ StatementRef statementRef(Db* db, Statement* stmt) {
 
 // Creates a new statement. Internal helper for the DB, not callable
 // from the outside (they need to insert into the DB as a complete
-// operation). Note: clause ownership transfers to the DB, which then
-// becomes responsible for freeing it. 
+// operation). Note: clause and ctx.otherAttributes ownership transfers
+// to the DB, which then becomes responsible for freeing them.
 // 
 // This will increase clause's refCount by 1, and will
 // decrement refCount by 1 when it's done with clause.
 // clause and trieClause should be identical (with clause considered
 // authoritative)
-static StatementRef statementNew(Db* db, Zicl_List* clause, 
-                                 long keepMs, AtomicallyVersion* const* atomicallyVersions,
-                                 int atomicallyVersionsCount,
-                                 const char* sourceFileName, int sourceLineNumber) {
+static StatementRef statementNew(Db* db, Zicl_List* clause, StatementContext ctx) {
     StatementRef ret;
     Statement* stmt = NULL;
 
     Zicl_MakeCrossthread(Zicl_BoxList(clause));
+    if (ctx.otherAttributes != NULL) Zicl_MakeCrossthread(Zicl_BoxDict(ctx.otherAttributes));
 
     // Look for a free statement slot to use:
     while (1) {
@@ -551,17 +552,17 @@ static StatementRef statementNew(Db* db, Zicl_List* clause,
     Zicl_Ref(Zicl_BoxList(clause));
 
     stmt->clause = clause;
-    stmt->keepMs = keepMs;
+    stmt->keepMs = ctx.keepMs;
 
     // inflightCount must start incremented so that no inherited
     // version reports convergence (inflightCount = 0)
     // before the first reaction is dispatched.
-    stmt->atomicallyVersionsCount = atomicallyVersionsCount;
-    stmt->atomicallyVersions = atomicallyVersionsCount == 0 ? NULL :
-        malloc(sizeof(AtomicallyVersion*) * atomicallyVersionsCount);
-    for (int i = 0; i < atomicallyVersionsCount; i++) {
-        stmt->atomicallyVersions[i] = atomicallyVersions[i];
-        dbAtomicallyVersionInflightIncr(atomicallyVersions[i]);
+    stmt->atomicallyVersionsCount = ctx.atomicallyVersionsCount;
+    stmt->atomicallyVersions = ctx.atomicallyVersionsCount == 0 ? NULL :
+        malloc(sizeof(AtomicallyVersion*) * ctx.atomicallyVersionsCount);
+    for (int i = 0; i < ctx.atomicallyVersionsCount; i++) {
+        stmt->atomicallyVersions[i] = ctx.atomicallyVersions[i];
+        dbAtomicallyVersionInflightIncr(ctx.atomicallyVersions[i]);
     }
     stmt->parentCount = 1;
     stmt->keepRemovalPending = false;
@@ -581,8 +582,9 @@ static StatementRef statementNew(Db* db, Zicl_List* clause,
     pthread_mutexattr_destroy(&mta);
 
     snprintf(stmt->sourceFileName, sizeof(stmt->sourceFileName),
-             "%s", sourceFileName);
-    stmt->sourceLineNumber = sourceLineNumber;
+             "%s", ctx.sourceFileName);
+    stmt->sourceLineNumber = ctx.sourceLineNumber;
+    stmt->otherAttributes = ctx.otherAttributes;
 
     return ret;
 }
@@ -598,6 +600,11 @@ static void statementDestroy(Statement* stmt) {
 
     pthread_mutex_destroy(&stmt->lifecycleMutex);
     free(stmt->atomicallyVersions);
+
+    if (stmt->otherAttributes != NULL) {
+        Zicl_DropRefDict(stmt->otherAttributes);
+        stmt->otherAttributes = NULL;
+    }
 
     Zicl_List* stmtClause = statementClause(stmt);
     // Marks this statement slot as being fully free and ready for reuse.
@@ -628,6 +635,9 @@ char* statementSourceFileName(Statement* stmt) {
 }
 int statementSourceLineNumber(Statement* stmt) {
     return stmt->sourceLineNumber;
+}
+Zicl_Dict* statementOtherAttributes(Statement* stmt) {
+    return stmt->otherAttributes;
 }
 
 int statementIncompleteChildMatchesCount(Db* db, Statement* stmt) {
@@ -1291,10 +1301,8 @@ static bool tryReuseStatement(Db* db, Statement* stmt, Match* parentMatch) {
 // 
 // (both of these mean that the caller shouldn't trigger a reaction,
 // since no new statement is being created).
-Statement* dbInsertOrReuseStatement(Db* db, Zicl_List* clause, long keepMs,
-                                    AtomicallyVersion* const* atomicallyVersions,
-                                    int atomicallyVersionsCount,
-                                    const char* sourceFileName, int sourceLineNumber,
+Statement* dbInsertOrReuseStatement(Db* db, Zicl_List* clause,
+                                    StatementContext ctx,
                                     MatchRef parentMatchRef,
                                     StatementRef* outReusedStatementRef) {
 #define setReusedStatementRef(_ref) \
@@ -1312,6 +1320,7 @@ Statement* dbInsertOrReuseStatement(Db* db, Zicl_List* clause, long keepMs,
         parentMatch = matchAcquire(db, parentMatchRef);
         if (parentMatch == NULL) {
             setReusedStatementRef(STATEMENT_REF_NULL);
+            if (ctx.otherAttributes != NULL) Zicl_DropRefDict(ctx.otherAttributes);
             Zicl_DropRef(clauseAsValue);
             return NULL; // Abort!
         }
@@ -1323,6 +1332,7 @@ Statement* dbInsertOrReuseStatement(Db* db, Zicl_List* clause, long keepMs,
             matchRelease(db, parentMatch);
 
             setReusedStatementRef(STATEMENT_REF_NULL);
+            if (ctx.otherAttributes != NULL) Zicl_DropRefDict(ctx.otherAttributes);
             Zicl_DropRef(clauseAsValue);
             return NULL; // Abort!
         }
@@ -1334,9 +1344,7 @@ Statement* dbInsertOrReuseStatement(Db* db, Zicl_List* clause, long keepMs,
     }
 
     // We'll provisionally create a new statement to add.
-    StatementRef ref = statementNew(db, clause,
-                                    keepMs, atomicallyVersions, atomicallyVersionsCount,
-                                    sourceFileName, sourceLineNumber);
+    StatementRef ref = statementNew(db, clause, ctx);
 
     // Now try to add to the trie: the trieAdd operation will
     // atomically detect if the clause is already present.
@@ -1386,6 +1394,7 @@ Statement* dbInsertOrReuseStatement(Db* db, Zicl_List* clause, long keepMs,
                     // Free the new statement `ref` that we created,
                     // since we won't be using it.
                     Statement* newStmt = statementAcquire(db, ref);
+                    assert(newStmt != NULL);
                     pthread_mutex_lock(&newStmt->lifecycleMutex);
                     newStmt->parentCount = 0;
                     newStmt->removing = true;
@@ -1620,9 +1629,12 @@ Statement* dbHoldStatement(Db* db, const char* key, double version,
             hold->version = version;
 
             StatementRef reusedStatementRef;
-            newStmt = dbInsertOrReuseStatement(db, clause,
-                                               keepMs, NULL, 0,
-                                               sourceFileName, sourceLineNumber,
+            StatementContext ctx = {
+                .keepMs = keepMs,
+                .sourceFileName = sourceFileName,
+                .sourceLineNumber = sourceLineNumber,
+            };
+            newStmt = dbInsertOrReuseStatement(db, clause, ctx,
                                                MATCH_REF_NULL,
                                                &reusedStatementRef);
             if (newStmt != NULL) {

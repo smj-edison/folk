@@ -179,46 +179,6 @@ When /someone/ wishes to really load SAM2 &\
         return ret
     }
 
-    py::def segment {Image image num objId {list list num} points {list num} labels} {
-        global predictor_initialized
-        image_np = np.array(image.convert("RGB"))
-        objId = int(objId)
-        points = [list(map(float, point)) for point in points]
-        labels = list(map(int, labels))
-
-        with predictor_lock, torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
-            if not predictor_initialized:
-                predictor.load_first_frame(image_np)
-                predictor_initialized = True
-            else:
-                predictor.load_prompt_frame(image_np)
-
-            try:
-                _, out_obj_ids, out_mask_logits = predictor.add_new_prompt_during_track(
-                    obj_id=objId,
-                    point=points,
-                    labels=labels,
-                    clear_old_points=True,
-                )
-
-                masks = (out_mask_logits[:, 0] > 0).detach().cpu().numpy()
-                assert len(masks) == len(out_obj_ids), (
-                    f"sam2: got {len(masks)} masks for {len(out_obj_ids)} object ids"
-                )
-
-                ret = bytearray()
-                ret.extend(struct.pack("<I", len(out_obj_ids)))
-                for idx, obj_id in enumerate(out_obj_ids):
-                    mask = np.ascontiguousarray(masks[idx].astype(np.uint8) * 255)
-                    mask_bytes = mask.tobytes()
-                    ret.extend(struct.pack("<iI", int(obj_id), len(mask_bytes)))
-                    ret.extend(mask_bytes)
-            finally:
-                predictor.discard_object_history(objId)
-
-        return ret
-    }
-
     py::def trackObjects {Image image} {
         global predictor_initialized
         image_np = np.array(image.convert("RGB"))
@@ -248,7 +208,7 @@ When /someone/ wishes to really load SAM2 &\
         return ret
     }
 
-    $py def saveObject {num objId str filename} {
+    py::def saveObject {num objId str filename} {
         objId = int(objId)
         filename = os.path.expanduser(filename)
 
@@ -258,7 +218,7 @@ When /someone/ wishes to really load SAM2 &\
         return predictor.save_object_state(payload, filename)
     }
 
-    $py def loadObject {num objId str filename} {
+    py::def loadObject {num objId str filename} {
         global predictor_initialized
         objId = int(objId)
         filename = os.path.expanduser(filename)
@@ -330,16 +290,16 @@ When /someone/ wishes to really load SAM2 &\
         decodeSAM2Masks [py::segment {*}$args]
     }
     fn SAM2SaveObject {id filename} {
-        $py saveObject [codec hash blake-3 $id] $filename
+        py::saveObject [codec hash blake-3 $id] $filename
     }
     fn SAM2LoadObject {id filename} {
-        $py loadObject [codec hash blake-3 $id] $filename
+        py::loadObject [codec hash blake-3 $id] $filename
     }
-    Claim the SAM2 object tracker is [fn SAM2Track]
-    Claim the SAM2 prompt adder is [fn SAM2AddPrompt]
-    Claim the SAM2 segmenter is [fn SAM2Segment]
-    Claim the SAM2 object saver is [fn SAM2SaveObject]
-    Claim the SAM2 object loader is [fn SAM2LoadObject]
+    Claim the SAM2 object tracker is $SAM2Track
+    Claim the SAM2 prompt adder is $SAM2AddPrompt
+    Claim the SAM2 segmenter is $SAM2Segment
+    Claim the SAM2 object saver is $SAM2SaveObject
+    Claim the SAM2 object loader is $SAM2LoadObject
 
     When the image library is /imageLib/ {
         set cc [dict link $C {}]
@@ -388,7 +348,6 @@ When /anyone/ wishes /page/ tracks object /id/ /...any/ {
 
 When the SAM2 object loader is /loadObject/ &\
      /someone/ wishes /page/ tracks object /id/ from filename /filename/ {
-    fn loadObject
     loadObject $id $filename
     Claim $page tracks object $id from filename $filename
 }
@@ -399,9 +358,6 @@ When the SAM2 mask-to-image library is /mtiLib/ &\
      /page/ has resolved geometry /geom/ &\
      the SAM2 object tracker is /sam2Track/ &\
      the SAM2 prompt adder is /sam2AddPrompt/ {
-
-    fn sam2Track
-    fn sam2AddPrompt
 
     fn sam2ObjectId {id} {
         set hash 0
@@ -430,8 +386,8 @@ When the SAM2 mask-to-image library is /mtiLib/ &\
                 }
             }
 
-            set x [expr {[lindex $prompt 0] / $geom(width) * $slice(width)}]
-            set y [expr {[lindex $prompt 1] / $geom(height) * $slice(height)}]
+            set x $([lindex $prompt 0] / $geom::width * $slice::width)
+            set y $([lindex $prompt 1] / $geom::height * $slice::height)
             lappend points [list $x $y]
             lappend labels $label
         }
@@ -445,7 +401,7 @@ When the SAM2 mask-to-image library is /mtiLib/ &\
             set maskedSlice [mtiLib::applyMaskToImage $slice $mask]
             Claim $page tracks object $id in frame $slice with \
                 {*}$promptSpecs masked-slice $maskedSlice \
-                -destructor [list $imageLib imageFree $maskedSlice]
+                -destructor [list imageLib::imageFree $maskedSlice]
             return
         }
     }
@@ -480,7 +436,7 @@ When the SAM2 mask-to-image library is /mtiLib/ &\
             set maskedIm [mtiLib::applyMaskToImage $slice $mask]
             Hold! -on $page -key [list sam2 track masked-image $id] \
                 Claim $id has SAM2 masked image $maskedIm in $page \
-                    -destructor [list $imageLib imageFree $maskedIm]
+                    -destructor [list imageLib::imageFree $maskedIm]
         }
     }
 
@@ -549,17 +505,16 @@ When the SAM2 mask-to-image library is /mtiLib/ &\
                             [string map {/ _ { } _} $page] \
                             [string map {/ _ { } _} $id] \
                             $promptIndex]
-                        $pngLib saveAsPng $promptIm $filename
+                        pngLib::saveAsPng $promptIm $filename
 
                         set fsize [file size $filename]
-                        set fd [open $filename r]
-                        fconfigure $fd -translation binary
-                        set promptImageData [read $fd $fsize]
+                        set fd [file open $filename r]
+                        set promptImageData [stream read $fd $fsize]
                         close $fd
 
                         StatementRelease! $promptRef
 
-                        set promptB64 [binary encode base64 $promptImageData]
+                        set promptB64 [codec encode base64 $promptImageData]
                         lappend promptSlices [format \
                             {<figure><img src="data:image/png;base64,%s"><figcaption>%s</figcaption></figure>} \
                             $promptB64 [htmlEscape $promptSpecs]]

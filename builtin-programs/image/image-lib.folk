@@ -63,7 +63,7 @@ cc::proc imageNew {int width int height int components int uniq} Image {
         .uniq = uniq
     };
 }
-$cc proc copyCrop {Image im int x int y int width int height} Image {
+cc::proc copyCrop {Image im int x int y int width int height} Image {
     FOLK_ENSURE(x >= 0 && y >= 0 && width > 0 && height > 0);
     FOLK_ENSURE(x + width <= im.width && y + height <= im.height);
     Image result = imageNew(width, height, im.components, im.uniq);
@@ -75,7 +75,7 @@ $cc proc copyCrop {Image im int x int y int width int height} Image {
     }
     return result;
 }
-$cc proc paddedCrop {Image im double paddingFraction int minimumPadding
+cc::proc paddedCrop {Image im double paddingFraction int minimumPadding
                      int backgroundR int backgroundG int backgroundB} Image {
     FOLK_ENSURE(im.components >= 3);
     FOLK_ENSURE(paddingFraction >= 0.0 && minimumPadding >= 0);
@@ -136,7 +136,7 @@ $cc proc paddedCrop {Image im double paddingFraction int minimumPadding
     }
     return result;
 }
-$cc proc paddedCropAt {Image im double centerXDouble double centerYDouble
+cc::proc paddedCropAt {Image im double centerXDouble double centerYDouble
                        double paddingFraction int minimumPadding
                        int backgroundR int backgroundG int backgroundB} Image {
     FOLK_ENSURE(im.components >= 3);
@@ -202,7 +202,7 @@ $cc proc paddedCropAt {Image im double centerXDouble double centerYDouble
     }
     return result;
 }
-$cc proc imageFree {Image image} void {
+cc::proc imageFree {Image image} void {
     free(image.data);
 }
 

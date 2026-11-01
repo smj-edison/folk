@@ -27,7 +27,7 @@ else
 	LINKER := cc
 endif
 
-folk: workqueue.o db.o trie.o sysmon.o epoch.o folk.o output-redirection.o block-stats.o \
+folk: workqueue.o db.o trie.o sysmon.o epoch.o folk.o output-redirection.o block-stats.o zicl-helpers.o \
 	vendor/c11-queues/mpmc_queue.o vendor/c11-queues/memory.o \
 	vendor/zicl/zig-out/lib/libzicl.a $(TRACY_TARGET) CFLAGS $(INTERPOSE_DYLIB)
 
@@ -44,7 +44,7 @@ folk: workqueue.o db.o trie.o sysmon.o epoch.o folk.o output-redirection.o block
 		(sudo -n true 2>/dev/null && sudo setcap cap_sys_rawio+ep $@) || true; \
 	fi
 
-%.o: %.c trie.h workqueue.h folk-zicl.h common.h CFLAGS
+%.o: %.c trie.h workqueue.h zicl-helpers.h common.h CFLAGS
 	cc -c -O2 -g3 -fno-omit-frame-pointer $(if $(ASAN_ENABLE),-fsanitize=address -fsanitize-recover=address,) $(if $(TSAN_ENABLE),-fsanitize=thread,) -o$@  \
 		-D_GNU_SOURCE -U_FORTIFY_SOURCE $(CFLAGS) $(BUILTIN_CFLAGS) \
 		$< -I./vendor/tracy/public -I./vendor/zicl/zig-out/include

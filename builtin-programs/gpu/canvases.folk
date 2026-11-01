@@ -206,8 +206,8 @@ When the GPU library is /gpuLib/ &\
         }
         return ziclNewString((const char*)&draw, sizeof(draw));
     }
-    $gpuc proc drawEncoded {Zicl_Val drawVal} void {
-        int len;
+    gpuc::proc drawEncoded {Zicl_Val drawVal} void {
+        size_t len;
         const char* bytes = ziclGetString(drawVal, &len);
         FOLK_ENSURE(len == sizeof(EncodedDraw));
         // Zicl's byte storage need not have the alignment of an EncodedDraw.
@@ -387,9 +387,9 @@ When the GPU library is /gpuLib/ &\
                     dict assign -all $result
                     try {
                         dict lappend resultsByLayer [dict getdef $options layer 0] $result
-                    } on error e {
-                        stream write $realStderr "Error: GPU draws pipeline $name: [errorInfo $e]"
-                        Assert! $this claims $wisher has error $e with info [errorInfo $e]
+                    } on error {e opts} {
+                        stream write $realStderr "Error: GPU draws pipeline $name: [errorInfoFor $e $opts]\n"
+                        Assert! $this claims $wisher has error $e with info [dict get $opts -errorstack]
                         # TODO: does this ever get disposed?
                     }
                 }
@@ -406,7 +406,7 @@ When the GPU library is /gpuLib/ &\
                             try {
                                 if {![dict exists $pipelines $name]} {
                                     if {![dict exists $missingPipelines $name]} {
-                                        puts stderr "canvases: Missing pipeline $name"
+                                        stream write $realStderr "canvases: Missing pipeline $name\n"
                                         dict set missingPipelines $name true
                                     }
                                     continue
@@ -445,9 +445,9 @@ When the GPU library is /gpuLib/ &\
                                 if {[dict size $pipelineDrawCache]} {
                                     dict set thisDrawCache $pipeline $pipelineDrawCache
                                 }
-                            } on error e {
-                                puts stderr "Error: GPU draws pipeline $name: [errorInfo $e]"
-                                Assert! $this claims $wisher has error $e with info [errorInfo $e]
+                            } on error {e opts} {
+                                stream write $realStderr "Error: GPU draws pipeline $name: [errorInfoFor $e $opts]\n"
+                                Assert! $this claims $wisher has error $e with info [dict get $opts -errorstack]
                             }
                         }
                     }

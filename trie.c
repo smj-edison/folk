@@ -6,7 +6,7 @@
 #include <stdarg.h>
 #include <pthread.h>
 
-#include "folk-zicl.h"
+#include "zicl-helpers.h"
 #include "trie.h"
 #include "epoch.h"
 
@@ -263,7 +263,7 @@ static const Trie* trieRemoveImpl(bool isLiteral,
             if (*resultsIdx < maxResults) {
                 results[(*resultsIdx)++] = trie->value;
             }
-            if (Zicl_AsObj(trie->key)) allocator->retireValue(Zicl_AsObj(trie->key));
+            if (Zicl_AsObj(trie->key)) allocator->retireObj(Zicl_AsObj(trie->key));
             allocator->retire((void *)trie);
             return NULL;
         }
@@ -341,7 +341,7 @@ static const Trie* trieRemoveImpl(bool isLiteral,
         }
     }
     if (newBranchesCount == 0) {
-        if (Zicl_AsObj(trie->key)) allocator->retireValue(Zicl_AsObj(trie->key));
+        if (Zicl_AsObj(trie->key)) allocator->retireObj(Zicl_AsObj(trie->key));
         allocator->retire((void *)trie);
         return NULL;
     }

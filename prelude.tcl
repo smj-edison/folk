@@ -15,46 +15,9 @@ source "lib/json.tcl"
 
 set folkPid [pid]
 
-# FIXME: zicl doesn't have channel handles like Jimtcl. Re-enable
-# buffering configuration when I/O is properly set up.
-# $realStdout buffering line
-# $realStderr buffering none
-# stdout buffering line
-
-set __exec $exec
-fn exec {args} {
-    # For background exec (ending with &), redirect stdout and stderr
-    # to the current thread-local output files so the subprocess's
-    # output lands in the right per-program /tmp/ file.
-    if {[lindex $args end] eq "&"} {
-        if {[info exists _folk_localStdout] && [info exists _folk_localStderr]} {
-            set hasStdout [lsearch -regexp $args {^>@}]
-            set hasStderr [lsearch -regexp $args {^2>@}]
-            set insertions {}
-            if {$hasStdout == -1} { lappend insertions >@ $_folk_localStdout }
-            if {$hasStderr == -1} { lappend insertions 2>@ $_folk_localStderr }
-            set args [lreplace $args end end {*}$insertions &]
-        }
-    } else {
-        # For non-background exec, replace >@stdout / 2>@stderr with
-        # the thread-local output channels so subprocess output lands
-        # in the right per-program /tmp/ file.
-        if {[info exists _folk_localStdout]} {
-            set i [lsearch -exact $args {>@stdout}]
-            if {$i != -1} { set args [lreplace $args $i $i >@ $_folk_localStdout] }
-        }
-        if {[info exists _folk_localStderr]} {
-            set i [lsearch -exact $args {2>@stderr}]
-            if {$i != -1} { set args [lreplace $args $i $i 2>@ $_folk_localStderr] }
-        }
-    }
-    tailcall __exec {*}$args
-}
-
-
-fn assert condition {
+fn assert {condition} {
     if {![uplevel [list expr $condition]]} {
-        return -code error "assertion failed: $condition"
+        error "assertion failed: $condition"
     }
 }
 fn baretime {body} {
@@ -113,7 +76,7 @@ fn Hold! {args} {
         set body [lindex $clause 0]
         lassign [info source $body] filename lineno
 
-        set closure [uplevel 1 [info source [list fn {} $body] $filename $lineno]]
+        set closure [info source [uplevel 1 [list fn {} $body]] $filename $lineno]
         set clause [list when $closure]
     } elseif {[llength $clause] > 1} {
         if {[lindex $clause 0] eq "Claim"} {
@@ -170,16 +133,18 @@ fn Say {args} {
             lappend pattern $term
         }
     }
-    tailcall SayWithSource $sourceFileName $sourceLineNumber \
-        $keepMs \
-        $atomicallyVersion \
-        $destructorCode \
+    tailcall SayWithSource [dict create \
+        sourceFileName $sourceFileName \
+        sourceLineNumber $sourceLineNumber \
+        keepMs $keepMs \
+        atomicallyVersion $atomicallyVersion \
+        destructorCode $destructorCode] \
         {*}$pattern
 }
 fn Claim {args} { upvar this this; tailcall Say [expr {[info exists this] ? $this : "<unknown>"}] claims {*}$args }
 fn Wish {args} { upvar this this; tailcall Say [expr {[info exists this] ? $this : "<unknown>"}] wishes {*}$args }
 # returns the statement to Say/Assert (minus the envStack), as well as all bound variable names
-proc desugarWhen {pattern body {whenOptions {}}} {
+fn desugarWhen {pattern body {whenOptions {}}} {
     set varNamesWillBeBound [list]
     set isNegated false
     for {set i 0} {$i < [llength $pattern]} {incr i} {
@@ -325,19 +290,22 @@ fn When {args} {
     }
 
     lassign [desugarWhen $pattern $body $whenOptions] clauseFront bodyToWrap boundVars whenOptions
+    set attrs [dict create \
+        sourceFileName [lindex $sourceInfo 0] \
+        sourceLineNumber [lindex $sourceInfo 1] \
+        keepMs $keepMs \
+        atomicallyVersion $atomicallyVersion]
     if {$whenOptions ne {}} {
-        # The runtime consumes this metadata before attaching the match and
-        # removes the frame before evaluation, so nested rules don't capture it.
-        set metadata [list __atomicallyKey [lindex $whenOptions 1]]
-        if {[info exists keep]} { lappend metadata $atomicTimeout }
-        lappend envStack $metadata
+        dict set attrs atomicallyKey [lindex $whenOptions 1]
+        if {[info exists keep]} {
+            dict set attrs atomicTimeout $atomicTimeout
+        }
     }
 
     # Note that by using `uplevel` on fn, we capture the parent's lexical scope.
     set closure [uplevel 1 [info source [list fn $boundVars $bodyToWrap] {*}$sourceInfo]]
 
-    tailcall SayWithSource {*}$sourceInfo \
-        $keepMs $atomicallyVersion {} \
+    tailcall SayWithSource $attrs \
         {*}$clauseFront $closure
 }
 fn Subscribe: {args} {
@@ -352,8 +320,9 @@ fn Subscribe: {args} {
     # Note that by using `uplevel` on fn, we capture the parent's lexical scope.
     set closure [uplevel 1 [info source [list fn $boundVars $bodyToWrap] {*}$sourceInfo]]
 
-    tailcall SayWithSource {*}$sourceInfo \
-        0 {} {} \
+    tailcall SayWithSource [dict create \
+        sourceFileName [lindex $sourceInfo 0] \
+        sourceLineNumber [lindex $sourceInfo 1]] \
         {*}$clauseFront $closure
 }
 fn On {event body} {

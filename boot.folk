@@ -42,18 +42,18 @@ Assert! when /this/ has program code /programCode/ [fn {this programCode} {
         # We don't have Collect available in boot.folk yet, since it's
         # implemented in userspace, so we can't do the queries. Just
         # run it always.
-        SayWithSource $this 1 0 {} {} \
+        SayWithSource [dict create sourceFileName $this sourceLineNumber 1] \
             when [fn {} $programCode]
         return
     }
 
     When /nobody/ wishes program $this does not run {
         When /nobody/ wishes program $this is replaced with /...anything/ {
-            SayWithSource $this 1 0 {} {} \
+            SayWithSource [dict create sourceFileName $this sourceLineNumber 1] \
                 when [fn {} $programCode]
         }
         When /someone/ wishes program $this is replaced with /...replacedOpts/ {
-            SayWithSource $this 1 0 {} {} \
+            SayWithSource [dict create sourceFileName $this sourceLineNumber 1] \
                 when [fn {} [info source [dict get $replacedOpts code] $this 1]]
         }
     }

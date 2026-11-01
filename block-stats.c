@@ -6,7 +6,7 @@
 #include "vendor/stb_ds.h"
 
 #include <libzicl.h>
-#include "folk-zicl.h"
+#include "zicl-helpers.h"
 
 #include "common.h"
 #include "block-stats.h"

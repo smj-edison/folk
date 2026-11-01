@@ -62,6 +62,7 @@ bool statementAtomicallyHasConverged(Statement* stmt);
 
 char* statementSourceFileName(Statement* stmt);
 int statementSourceLineNumber(Statement* stmt);
+Zicl_Dict* statementOtherAttributes(Statement* stmt);
 
 int statementIncompleteChildMatchesCount(Db* db, Statement* stmt);
 
@@ -125,8 +126,20 @@ void dbInflightDecr(Db* db, Statement* stmt);
 void dbAtomicallyVersionInflightIncr(AtomicallyVersion* atomicallyVersion);
 void dbAtomicallyVersionInflightDecr(Db* db, AtomicallyVersion* atomicallyVersion);
 
-// Note: once you call this, ownership of `clause` transfers to the
-// DB, which then becomes responsible for freeing it later.
+typedef struct StatementContext {
+    long keepMs;
+    // Referenced; copied by statementNew.
+    AtomicallyVersion* const* atomicallyVersions;
+    int atomicallyVersionsCount;
+    // Referenced; copied into stmt->sourceFileName by statementNew.
+    const char* sourceFileName;
+    int sourceLineNumber;
+    // Owned; ownership transfers to the DB on insertion.
+    Zicl_Dict* otherAttributes;
+} StatementContext;
+
+// Note: once you call this, ownership of `clause` and `ctx.otherAttributes`
+// transfers to the DB, which then becomes responsible for freeing them later.
 //
 // Pass a null MatchRef for `parent` if this is an assertion.
 //
@@ -134,11 +147,9 @@ void dbAtomicallyVersionInflightDecr(Db* db, AtomicallyVersion* atomicallyVersio
 // the caller. (This is mainly so that the caller can insert
 // destructors at will before doing the release.) Returns NULL if no
 // new statement was created.
-// atomicallyVersions is a set (no duplicate pointers); creation copies it.
-Statement* dbInsertOrReuseStatement(Db* db, Zicl_List* clause, long keepMs,
-                                    AtomicallyVersion* const* atomicallyVersions,
-                                    int atomicallyVersionsCount,
-                                    const char* sourceFileName, int sourceLineNumber,
+// ctx.atomicallyVersions is a set (no duplicate pointers); creation copies it.
+Statement* dbInsertOrReuseStatement(Db* db, Zicl_List* clause,
+                                    StatementContext ctx,
                                     MatchRef parent,
                                     StatementRef* outReusedStatementRef);
 

@@ -25,7 +25,7 @@
 #include "common.h"
 #include "epoch.h"
 #include "trie.h"
-#include "folk-zicl.h"
+#include "zicl-helpers.h"
 
 extern void installLocalStdoutAndStderr(int stdoutfd, int stderrfd);
 

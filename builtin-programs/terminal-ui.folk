@@ -31,16 +31,25 @@ while true {
         string compare [dict get $a program] [dict get $b program]
     }] [Query! /program/ has program code /programCode/]]
 
+    set runnersByProgram [dict create]
+    foreach runner [Query! when /runnerClosure/] {
+        set closureDict [lrange [dict get $runner runnerClosure] 1 end]
+        if {[dict exists $closureDict scope]} {
+            set scope [deref [dict get $closureDict scope]]
+            if {[dict exists $scope this]} {
+                dict set runnersByProgram [dict get $scope this] [dict get $runner __ref]
+            }
+        }
+    }
+
     # Build groups: dict mapping dirname -> list of {status basename}
     set groups [dict create]
     foreach result $results {
         set program [dict get $result program]
-        set programCode [dict get $result programCode]
 
-        set runners [Query! when $programCode with environment [list [list this $program]]]
-        if {[llength $runners] != 1} { continue }
-        set runner [lindex $runners 0]
-        set incompleteCount [__statementIncompleteChildMatchesCount [dict get $runner __ref]]
+        if {![dict exists $runnersByProgram $program]} { continue }
+        set runnerRef [dict get $runnersByProgram $program]
+        set incompleteCount [__statementIncompleteChildMatchesCount $runnerRef]
 
         set errors [Query! $program has error /err/ with info /info/]
 
