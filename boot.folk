@@ -1,66 +1,73 @@
 # This program gets directly evaluated at the top level.
 
-apply {{} {
+apply [fn {} {
     # We setpgrp so that all subprocesses spawned by Folk, even ones
     # that outlive Folk itself, can be killed later by their PGID (the
     # PID in folk.pid).
     catch { setpgrp }
 
     catch {
-        set fp [open "folk.pid" r]
-        set oldPid [read $fp]; close $fp
+        set fp [file open "folk.pid" r]
+        set oldPid [stream read $fp]; close $fp
         try {
             if {[string trim [exec ps -o state= -p $oldPid]] eq "Z"} {
                 error "Zombie Folk process exists (PID $oldPid)"
             }
-            puts $::realStderr "boot: ($::errorCode) ERROR: Another Folk (PID $oldPid) already running."
+            stream write $realStderr "boot: ERROR: Another Folk (PID $oldPid) already running.\n"
             Exit! 1
         } on error e {
             if {$e ne ""} {
-                puts stderr "boot: $e; this is OK; continuing."
+                stream write $realStderr "boot: $e; this is OK; continuing.\n"
             }
         }
     }
 
-    set fp [open "folk.pid" w]
-    puts -nonewline $fp [pid]; close $fp
+    set fp [file open "folk.pid" w]
+    stream write $fp [pid]; close $fp
     # in case we're running as root:
     catch { exec chown folk folk.pid }
-}}
+}]
 
 __installLocalStdoutAndStderr "boot.folk"
 
-Assert! when /_this/ has program code /programCode/ {
-    if {$_this eq "builtin-programs/collect.folk"} {
+Assert! when /this/ has program code /programCode/ [fn {this programCode} {
+    # Program code arrives as a bare string (read off disk, out of the
+    # editor, off a printed page), so it carries no source location and
+    # every error inside it would report an empty file name. Stamp the
+    # program's own name and line 1 on it here, at the one place all of
+    # those producers funnel through.
+    set programCode [info source $programCode $this 1]
+
+    if {$this eq "builtin-programs/collect.folk"} {
         # We don't have Collect available in boot.folk yet, since it's
         # implemented in userspace, so we can't do the queries. Just
         # run it always.
-        SayWithSource $_this 1 0 {} {} \
-            when $programCode with environment [list [list this $_this]]
+        SayWithSource [dict create sourceFileName $this sourceLineNumber 1] \
+            when [fn {} $programCode]
         return
     }
 
-    When /nobody/ wishes program $_this does not run {
-        When /nobody/ wishes program $_this is replaced with /...anything/ {
-            SayWithSource $_this 1 0 {} {} \
-                when $programCode with environment [list [list this $_this]]
+    When /nobody/ wishes program $this does not run {
+        When /nobody/ wishes program $this is replaced with /...anything/ {
+            SayWithSource [dict create sourceFileName $this sourceLineNumber 1] \
+                when [fn {} $programCode]
         }
-        When /someone/ wishes program $_this is replaced with /...replacedOpts/ {
-            SayWithSource $_this 1 0 {} {} \
-                when [dict get $replacedOpts code] with environment [list [list this $_this]]
+        When /someone/ wishes program $this is replaced with /...replacedOpts/ {
+            SayWithSource [dict create sourceFileName $this sourceLineNumber 1] \
+                when [fn {} [info source [dict get $replacedOpts code] $this 1]]
         }
     }
-} with environment {}
+}]
 
-local proc LoadProgram! {programFilename} {
-    set fp [open $programFilename r]
-    set code [read $fp]
+fn LoadProgram! {programFilename} {
+    set fp [file open $programFilename r]
+    set code [stream read $fp]
     close $fp
 
-    set editedPath "$::env(HOME)/folk-data/program/[regsub {\.folk$} $programFilename {}].folk.edited"
+    set editedPath "$env::HOME/folk-data/program/[regsub {\.folk$} $programFilename {}].folk.edited"
     if {[file exists $editedPath]} {
-        set efd [open $editedPath r]
-        set code [read $efd]
+        set efd [file open $editedPath r]
+        set code [stream read $efd]
         close $efd
     }
 
@@ -71,8 +78,8 @@ local proc LoadProgram! {programFilename} {
 foreach programFilename [list {*}[glob -nocomplain builtin-programs/*.folk] \
                              {*}[glob -nocomplain builtin-programs/*/*.folk] \
                              {*}[glob -nocomplain "user-programs/[info hostname]/*.folk"] \
-                             {*}[glob -nocomplain "$::env(HOME)/folk-data/local-program/*.folk"] \
-                             {*}[glob -nocomplain "$::env(HOME)/folk-data/local-program/*/*.folk"]] {
+                             {*}[glob -nocomplain "$env::HOME/folk-data/local-program/*.folk"] \
+                             {*}[glob -nocomplain "$env::HOME/folk-data/local-program/*/*.folk"]] {
     if {[string match "*/_archive/*" $programFilename]} {
         continue
     }
@@ -80,15 +87,15 @@ foreach programFilename [list {*}[glob -nocomplain builtin-programs/*.folk] \
     LoadProgram! $programFilename
 }
 
-if {$::tcl_platform(os) eq "darwin"} {
+if {$tcl_platform::os eq "darwin"} {
     # HACK: We must run all the GPU and window setup stuff
     # synchronously in the main thread on macOS.
 
-    proc fake {s} {
+    fn fake {s} {
         set __envStack [list]
 
         rename When When'
-        proc When args {
+        fn When args {
             set pattern [lrange $args 0 end-1]
 
             # Await the dependencies being available.

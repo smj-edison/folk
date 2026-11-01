@@ -1,9 +1,11 @@
+#include "zicl-helpers.h"
 #define _GNU_SOURCE
 #include <unistd.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdarg.h>
+#include <stdbool.h>
 #include <assert.h>
 #include <pthread.h>
 #include <sys/syscall.h>
@@ -72,9 +74,8 @@ static interpose_t write_interpose[] __attribute__((section("__DATA,__interpose"
 
 #else
 // Normal build (linked into main binary): output redirection globals,
-// per-thread fd substitution, and Jim command registration.
+// per-thread fd substitution, and Zicl command registration.
 
-#include <jim.h>
 
 int realStdout = -1;
 int realStderr = -1;
@@ -147,7 +148,13 @@ static ProgramFds *programFdsTable = NULL;
 static pthread_rwlock_t programFdsLock = PTHREAD_RWLOCK_INITIALIZER;
 static char outputDir[256];
 
-void outputRedirectionInit(void) {
+void outputRedirectionInit(bool doRedirect) {
+    if (!doRedirect) {
+        realStdout = 1;
+        realStderr = 2;
+        return;
+    }
+
     sh_new_arena(programFdsTable);
 
     snprintf(outputDir, sizeof(outputDir), "/var/tmp/folk-%d", (int)getpid());
@@ -173,8 +180,14 @@ void outputRedirectionInit(void) {
 }
 
 void installLocalStdoutAndStderr(int stdoutfd, int stderrfd) {
+    if (programFdsTable == NULL) {
+        return;
+    }
+
     threadLocalStdout = stdoutfd;
+    Zicl_SetLocalStdout(stdoutfd);
     threadLocalStderr = stderrfd;
+    Zicl_SetLocalStderr(stderrfd);
 }
 
 static void escapeProgramName(const char *in, char *out, size_t outlen) {
@@ -189,15 +202,19 @@ static void escapeProgramName(const char *in, char *out, size_t outlen) {
     out[j] = '\0';
 }
 
-static int __installLocalStdoutAndStderrFunc(Jim_Interp *interp, int argc, Jim_Obj *const *argv) {
-    assert(argc == 2);
-    const char *this = Jim_String(argv[1]);
+void installLocalStdoutAndStderrForProgram(const char *thisProgram) {
+    // outputRedirectionInit(false) (e.g. `./folk somefile.folk`) skips setting
+    // up per-program redirection entirely, leaving this table NULL. In that
+    // mode there's nowhere to redirect to, so just leave stdout/stderr alone.
+    if (programFdsTable == NULL) {
+        return;
+    }
 
     int stdoutfd, stderrfd;
 
     // Fast path: entry already exists — look up under rlock.
     pthread_rwlock_rdlock(&programFdsLock);
-    ProgramFds *e = shgetp_null(programFdsTable, this);
+    ProgramFds *e = shgetp_null(programFdsTable, thisProgram);
     if (e != NULL) {
         stdoutfd = e->stdoutfd;
         stderrfd = e->stderrfd;
@@ -207,7 +224,7 @@ static int __installLocalStdoutAndStderrFunc(Jim_Interp *interp, int argc, Jim_O
 
         // Slow path: new program — open files and insert under wlock.
         char escaped[2048];
-        escapeProgramName(this, escaped, sizeof(escaped));
+        escapeProgramName(thisProgram, escaped, sizeof(escaped));
         char path[4096];
         snprintf(path, sizeof(path), "%s/%s.stdout", outputDir, escaped);
         stdoutfd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
@@ -215,50 +232,36 @@ static int __installLocalStdoutAndStderrFunc(Jim_Interp *interp, int argc, Jim_O
         stderrfd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
 
         pthread_rwlock_wrlock(&programFdsLock);
-        if (shgetp_null(programFdsTable, this) == NULL) {
-            ProgramFds new_entry = { .key = (char *)this,
+        if (shgetp_null(programFdsTable, thisProgram) == NULL) {
+            ProgramFds new_entry = { .key = (char *)thisProgram,
                                      .stdoutfd = stdoutfd, .stderrfd = stderrfd };
             shputs(programFdsTable, new_entry);
         } else {
             // Another thread inserted first; close our fds and use theirs.
             close(stdoutfd); close(stderrfd);
-            e = shgetp_null(programFdsTable, this);
+            e = shgetp_null(programFdsTable, thisProgram);
             stdoutfd = e->stdoutfd;
             stderrfd = e->stderrfd;
         }
         pthread_rwlock_unlock(&programFdsLock);
     }
 
-    if (stdoutfd == -1 || stderrfd == -1) { return JIM_ERR; }
+    if (stdoutfd == -1 || stderrfd == -1) { return; }
     installLocalStdoutAndStderr(stdoutfd, stderrfd);
-
-    // Set ::_folk_localStdout/Stderr as non-owning channels for the exec wrapper.
-    // Delete the previous channels (if any) before creating new ones, to avoid
-    // accumulating one channel pair per when-block execution in the interpreter's
-    // command table. Use keepopen=1 since the fds are managed by programFdsTable.
-    Jim_Obj *oldChan;
-    oldChan = Jim_GetVariableStr(interp, "::_folk_localStdout", JIM_NONE);
-    if (oldChan) { Jim_DeleteCommand(interp, oldChan); }
-    oldChan = Jim_GetVariableStr(interp, "::_folk_localStderr", JIM_NONE);
-    if (oldChan) { Jim_DeleteCommand(interp, oldChan); }
-
-    Jim_AioMakeChannelFromFd(interp, stdoutfd, 1);
-    Jim_SetVariableStr(interp, "::_folk_localStdout", Jim_GetResult(interp));
-    Jim_AioMakeChannelFromFd(interp, stderrfd, 1);
-    Jim_SetVariableStr(interp, "::_folk_localStderr", Jim_GetResult(interp));
-
-    return JIM_OK;
 }
 
-void outputRedirectionInterpSetup(Jim_Interp *interp) {
-    assert(realStdout != -1 && realStderr != -1);
-    Jim_AioMakeChannelFromFd(interp, realStdout, 1);
-    Jim_SetVariableStr(interp, "::realStdout", Jim_GetResult(interp));
-    Jim_AioMakeChannelFromFd(interp, realStderr, 1);
-    Jim_SetVariableStr(interp, "::realStderr", Jim_GetResult(interp));
-
-    Jim_CreateCommand(interp, "__installLocalStdoutAndStderr",
-                      __installLocalStdoutAndStderrFunc, NULL, NULL);
+static int __installLocalStdoutAndStderrFunc(Zicl_Interp *interp, int argc, Zicl_Shim *argv) {
+    assert(argc == 2);
+    installLocalStdoutAndStderrForProgram(ziclShimString(&argv[1]));
+    return ZICL_OK;
 }
 
+static int __doNothingFunc(Zicl_Interp *interp, int argc, Zicl_Shim *argv) {
+    return ZICL_OK;
+}
+
+void outputRedirectionInterpSetup(Zicl_Interp *interp) {
+    Zicl_CreateCommand(interp, "__installLocalStdoutAndStderr",
+                        __installLocalStdoutAndStderrFunc, "this", 1, 1);
+}
 #endif // FOLK_INTERPOSE_DYLIB

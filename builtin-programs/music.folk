@@ -1,8 +1,8 @@
-if {[catch {exec which sclang}]} {
+if {[catch {exec which sclang}] == 0} {
     error "music: sclang doesn't exist; not running."
 }
 
-set musicDir $::env(HOME)/music
+set musicDir $env::HOME/music
 exec mkdir -p $musicDir
 # https://raw.githubusercontent.com/tidalcycles/Tidal/main/BootTidal.hs
 set bootTidal {
@@ -90,10 +90,10 @@ let getState = streamGet tidal
 default (Pattern String, Integer, Double)
 }
 
-set scStartup [open $musicDir/startup.sc w]
+set scStartup [file open $musicDir/startup.sc w]
 # via https://club.tidalcycles.org/t/tidal-synth-doesnt-work/800 -- it
 # doesn't work if you just do SuperDirt.start; for some reason
-puts $scStartup {(
+stream write $scStartup {(
 s.reboot { // server options are only updated on reboot
 	// configure the sound server: here you could add hardware specific options
 	// see http://doc.sccode.org/Classes/ServerOptions.html
@@ -133,11 +133,12 @@ s.reboot { // server options are only updated on reboot
 
 
 };
-);}
+);
+}
 close $scStartup
 
-set uid [exec id -u $::env(USER)]
-set ::env(DBUS_SESSION_BUS_ADDRESS) "unix:path=/run/user/$uid/bus"
+set uid [exec id -u $env::USER]
+set env::DBUS_SESSION_BUS_ADDRESS "unix:path=/run/user/$uid/bus"
 
 exec rm -f $musicDir/music.log
 fn musicExec {args} {
@@ -148,9 +149,9 @@ fn musicExec {args} {
   }
 }
 fn musicFinishSetup {} {
-  if {$::thisNode eq "folk-hex"} {
+  if {$thisNode eq "folk-hex"} {
       exec jackd -d alsa -d hdmi:CARD=NVidia -r 48000 -p 1024 -n 2 &
-  } elseif {$::thisNode eq "folk-sva"} {
+  } elseif {$thisNode eq "folk-sva"} {
       exec jackd -d alsa -d hdmi:CARD=Generic,DEV=1 -r 48000 -p 1024 -n 2 &
   }
 
@@ -161,7 +162,7 @@ fn musicFinishSetup {} {
 
   sleep 0.4
 
-  set ::env(QT_QPA_PLATFORM) offscreen
+  set env::QT_QPA_PLATFORM offscreen
   musicExec sclang $musicDir/startup.sc &
 
   set fifo $musicDir/tidal-input
@@ -171,8 +172,8 @@ fn musicFinishSetup {} {
   sleep 0.2
   musicExec sh -c "ghci < $fifo" &
 
-  set fifoId [open $fifo w]
-  puts $fifoId $bootTidal; flush $fifoId
+  set fifoId [file open $fifo w]
+  stream write $fifoId "$bootTidal\n"
   # We keep $fifoId open so that ghci doesn't get an EOF.
 }
 

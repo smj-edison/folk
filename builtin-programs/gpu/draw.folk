@@ -4,14 +4,14 @@
 #     numerical parameters (so you can draw images, shapes, etc.)
 #     Single render thread handles all displays.
 
-if {[info exists this] && $::tcl_platform(os) eq "darwin"} {
+if {[info exists this] && $tcl_platform::os eq "darwin"} {
     # We hard-code draw.folk into thread 0, so we should abort if not
     # running that way.
     return
 }
 
 When the GPU library is /gpuLib/ &\
-     the GPU Vulkan handle type definer is /defineVulkanHandleType/ &\
+     the GPU Vulkan C prototype is /Vulkan/ &\
      the GPU texture library is /gpuTextureLib/ &\
      the GPU pipeline library is /pipelineLib/ &\
      the GPU pipeline compiler library is /pipelineCompilerLib/ {
@@ -20,38 +20,37 @@ When the GPU library is /gpuLib/ &\
 # block because all the weird GPU initialization stuff, and 2. on
 # macOS, the reactivity is fake and wouldn't work.
 sleep 1
-set useDisplays [Query! /someone/ wishes $::thisNode uses display /display/ with /...displayOpts/]
+set useDisplays [Query! /someone/ wishes $thisNode uses display /display/ with /...displayOpts/]
 
-fn defineVulkanHandleType
 
 set useGlfw false
 foreach result $useDisplays {
-    if {$result(display) eq "glfw"} {
+    if {$result::display eq "glfw"} {
         set useGlfw true
     }
 }
 
-set cc [C]
-$cc cflags -I./vendor
-$cc include <stdlib.h>
-$cc include <unistd.h>
-$cc include <pthread.h>
-$cc code {
+set cc [dict link $C {}]
+cc::addcflags -I./vendor
+cc::include <stdlib.h>
+cc::include <unistd.h>
+cc::include <pthread.h>
+cc::addcode {
     #define VOLK_IMPLEMENTATION
     #include "volk/volk.h"
 }
 if {$useGlfw} {
-    $cc code {
+    cc::addcode {
         // This must be included _after_ volk.h (Vulkan).
         #include <GLFW/glfw3.h>
     }
-    $cc endcflags -lglfw
+    cc::addendcflags -lglfw
 }
 
-$cc extend $gpuLib
-$cc extend $pipelineLib
+cc::extend $gpuLib
+cc::extend $pipelineLib
 
-local proc vktry {call} { string map {\n " "} [csubst {{
+fn vktry {call} { string map {\n " "} [csubst {{
     VkResult res = $call;
     if (res != VK_SUCCESS) {
         /* TODO: We also need to unwind all the GPU state. */
@@ -59,8 +58,9 @@ local proc vktry {call} { string map {\n " "} [csubst {{
     }
 }}] }
 
-$cc code [subst {
+cc::addcode [subst {
     typedef struct DisplayState {
+        Zicl_CapHead head;
         VkSurfaceKHR surface;
         VkSwapchainKHR swapchain;
         uint32_t swapchainImageCount;
@@ -84,17 +84,45 @@ $cc code [subst {
     static VkDescriptorSet boundDescriptorSet;
 }]
 
-$cc argtype DisplayState* {
-    DisplayState* $argname;
-    sscanf(Jim_String($obj), "(DisplayState*) %p", &$argname);
+cc::objtype DisplayState {
+    static void DisplayState_deinitBody(Zicl_CapHead* head) {
+        (void)head;
+    }
+
+    static void DisplayState_destroyBacking(Zicl_CapHead* head) {
+        free(Zicl_ContainerOf(head, DisplayState, head));
+    }
+
+    static const Zicl_CapHeadVTable DisplayState_vtable = {
+        .name = "display-state",
+        .deinit_body = DisplayState_deinitBody,
+        .destroy_backing = DisplayState_destroyBacking,
+    };
+    const Zicl_CapHeadVTable* DisplayState_VTable = &DisplayState_vtable;
+
+    static inline DisplayState* DisplayState_unwrap(Zicl_Interp* interp, Zicl_Shim* shim) {
+        Zicl_CapHead* head = NULL;
+        __ENSURE_OK(Zicl_ResolveCap(interp, shim, DisplayState_VTable, &head));
+        __capCleanupDefer(head);
+        return Zicl_ContainerOf(head, DisplayState, head);
+    }
+
+    static inline Zicl_Val DisplayState_wrap(DisplayState* ds) {
+        memset(&ds->head, 0, sizeof(ds->head));
+        ds->head.vtable = DisplayState_VTable;
+        Zicl_Val out;
+        folkZiclAssert(Zicl_CapNew(&ds->head, &out));
+        return out;
+    }
 }
-$cc rtype DisplayState* {
-    char buf[100];
-    snprintf(buf, 100, "(DisplayState*) %p", $rvalue);
-    $robj = Jim_NewStringObj(interp, buf, -1);
+cc::argtype DisplayState* {
+    DisplayState* $argname = DisplayState_unwrap(interp, $shim);
+}
+cc::rtype DisplayState* {
+    $robj = DisplayState_wrap($rvalue);
 }
 
-$cc proc initDisplay {char* display uint32_t width uint32_t height uint32_t refreshRate} DisplayState* {
+cc::proc initDisplay {char* display uint32_t width uint32_t height uint32_t refreshRate} DisplayState* {
     volkInitialize();
     volkLoadInstanceOnly(*instance_ptr());
 
@@ -364,10 +392,10 @@ $cc proc initDisplay {char* display uint32_t width uint32_t height uint32_t refr
 
     return ds;
 }
-$cc proc getDisplayWidth {DisplayState* ds} uint32_t { return ds->swapchainExtent.width; }
-$cc proc getDisplayHeight {DisplayState* ds} uint32_t { return ds->swapchainExtent.height; }
+cc::proc getDisplayWidth {DisplayState* ds} uint32_t { return ds->swapchainExtent.width; }
+cc::proc getDisplayHeight {DisplayState* ds} uint32_t { return ds->swapchainExtent.height; }
 
-$cc proc drawStart {DisplayState* ds} void {
+cc::proc drawStart {DisplayState* ds} void {
     currentDisplay = ds;
     VkCommandBuffer commandBuffer = getCommandBuffer();
 
@@ -411,7 +439,7 @@ $cc proc drawStart {DisplayState* ds} void {
 # Draw to the screen using pipeline `pipeline`. Each arg in `args`
 # should be a push-constant parameter of the pipeline. Can only be
 # called between `drawStart` and `drawEnd`.
-$cc proc draw {Pipeline pipeline Jim_Obj* argsObj} void {
+cc::proc draw {Zicl_Interp* interp Pipeline pipeline Zicl_Val argsObj} void {
     VkCommandBuffer commandBuffer = getCommandBuffer();
 
     if (boundPipeline != pipeline.pipeline) {
@@ -459,7 +487,7 @@ $cc proc draw {Pipeline pipeline Jim_Obj* argsObj} void {
     vkCmdDraw(commandBuffer, 6, 1, 0, 0);
 }
 
-$cc proc drawEnd {} void {
+cc::proc drawEnd {} void {
     DisplayState* ds = currentDisplay;
     VkCommandBuffer commandBuffer = getCommandBuffer();
 
@@ -516,32 +544,14 @@ $cc proc drawEnd {} void {
     currentDisplay = NULL;
 }
 
-$cc proc poll {} void {
+cc::proc poll {} void {
     $[expr { $useGlfw ? { glfwPollEvents(); } : {} }]
 }
 
-proc makeGpu {gpuLib pipelineLib drawLib} { return [library create gpu {gpuLib pipelineLib drawLib} {
-    variable gpuLib
-    variable pipelineLib
-    variable drawLib
-
-    if {![exists -command $drawLib]} {
-        # Load manually so we don't need to call a command.
-        $drawLib
-    }
-
-    foreach drawLibCmd [info commands "$drawLib *"] {
-        lassign $drawLibCmd _ drawLibCmd
-        proc $drawLibCmd {args} {drawLib drawLibCmd} {
-            tailcall "$drawLib $drawLibCmd" {*}$args
-        }
-    }
-}] }
-
-set drawLib [$cc compile]
+set drawLib [cc::compile]
 Claim the GPU draw library is $drawLib
 
-set gpu [makeGpu $gpuLib $pipelineLib $drawLib]
+set gpu $drawLib
 
 tracy setThreadName "gpu"
 
@@ -556,50 +566,58 @@ set kDrawCount [tracy makeString "drawCount"]
 
 fn QueryAllFns! {} {
     set fns [dict create]
-    ForEach! /someone/ claims the GPU compiles function /name/ to /fn/ {
-        dict set fns $name $fn
+    ForEach! /someone/ claims the GPU compiles function /name/ to /compiledFn/ {
+        dict set fns $name $compiledFn
     }
     return $fns
 }
-fn tryCompileFn {wisher name source} {
+# Both of these retry themselves once the function they were waiting on
+# shows up, so they go in a scope of their own and come back out through
+# [letrec select] -- a plain [fn] captures its scope before its own name is
+# bound, so the recursive call would not resolve.
+fn compileScope::tryCompileFn {wisher name source} {
     try {
         set fns [QueryAllFns!]
-        set fn [$pipelineCompilerLib fn $fns {*}$source]
+        set compiledFn [pipelineCompilerLib::fn $fns {*}$source]
 
         # Technically a misnomer: the function is just stored, not
         # compiled until it's been inlined into a shader.
-        Claim the GPU compiles function $name to $fn
+        Claim the GPU compiles function $name to $compiledFn
 
-    } on 99 notFoundName {
+    } trap {GPU FN_NOT_COMPILED} {_ notFoundOpts} {
+        set notFoundName [lindex [dict get $notFoundOpts -errorcode] 2]
         puts "gpu fn $name: Waiting for $notFoundName"
         When the GPU compiles function $notFoundName to /anything/ {
             puts "Did compile $notFoundName"
             tryCompileFn $wisher $name $source
         }
-    } on error e {
-        puts stderr "Error: GPU compiles function $name: [errorInfo $e]"
-        Claim $wisher has error $e with info [errorInfo $e]
+    } on error {e opts} {
+        puts stderr "Error: GPU compiles function $name: [errorInfoFor $e $opts]"
+        Claim $wisher has error $e with info [dict get $opts -errorstack]
     }
 }
-fn tryCompilePipeline {wisher name source} {
+fn compileScope::tryCompilePipeline {wisher name source} {
     try {
         set fns [QueryAllFns!]
-        set pipeline [$pipelineCompilerLib pipeline $fns {*}$source]
+        set pipeline [pipelineCompilerLib::pipeline $fns {*}$source]
 
         puts "gpu: tryCompilePipeline: Compiled $name"
         Claim the GPU compiles pipeline $name to $pipeline
 
-    } on 99 notFoundName {
+    } trap {GPU FN_NOT_COMPILED} {_ notFoundOpts} {
+        set notFoundName [lindex [dict get $notFoundOpts -errorcode] 2]
         puts "gpu pipeline $name: Waiting for $notFoundName"
         When the GPU compiles function $notFoundName to /anything/ {
             puts "Did compile $notFoundName"
             tryCompilePipeline $wisher $name $source
         }
-    } on error e {
-        puts stderr "Error: GPU compiles pipeline $name: [errorInfo $e]"
-        Claim $wisher has error $e with info [errorInfo $e]
+    } on error {e opts} {
+        puts stderr "Error: GPU compiles pipeline $name: [errorInfoFor $e $opts]"
+        Claim $wisher has error $e with info [dict get $opts -errorstack]
     }
 }
+set tryCompileFn [letrec select $compileScope tryCompileFn]
+set tryCompilePipeline [letrec select $compileScope tryCompilePipeline]
 
 When /wisher/ wishes the GPU compiles function /name/ /source/ {
     tryCompileFn $wisher $name $source
@@ -611,15 +629,18 @@ When /wisher/ wishes the GPU compiles pipeline /name/ /source/ {
 set missingPipelines [dict create]
 while true {
     # Advance texture retirement once per frame, then run canvas redraw work.
-    $gpuTextureLib beginTextureFrame
+    gpuTextureLib::beginTextureFrame
     ForEach! /someone/ wishes the GPU runs frame prelude handler /hd/ {
-        {*}$hd
+        hd
     }
 
     # Query draw commands once (shared across all displays).
     set results [Query! /someone/ claims the GPU compiles pipeline /name/ to /pipeline/]
     set pipelines [dict create]
-    foreach result $results { dict with result { dict set pipelines $name $pipeline } }
+    foreach result $results {
+        dict assign $result name pipeline
+        dict set pipelines $name $pipeline
+    }
 
     set displayList [dict create]
     foreach result [Query! /wisher/ wishes the GPU draws pipeline /name/ with /...options/] {
@@ -645,11 +666,11 @@ while true {
             }
             foreach instance $instances {
                 dict lappend displayList $layer \
-                    [list $gpu draw $pipeline $instance]
+                    [list gpu::draw $pipeline $instance]
             }
-        } on error e {
-            puts stderr "Error: GPU draws pipeline $name: [errorInfo $e]"
-            Assert! $this claims [dict get $result wisher] has error $e with info [errorInfo $e]
+        } on error {e opts} {
+            puts stderr "Error: GPU draws pipeline $name: [errorInfoFor $e $opts]"
+            Assert! $this claims [dict get $result wisher] has error $e with info [dict get $opts -errorstack]
             # TODO: does this ever get disposed?
         }
     }
@@ -660,17 +681,17 @@ while true {
         set displayOpts [dict get $result displayOpts]
 
         if {![dict exists $displays $display]} {
-            if {[llength [Query! $::thisNode has display $display with /...any/]] == 0} {
+            if {[llength [Query! $thisNode has display $display with /...any/]] == 0} {
                 puts stderr "gpu/draw: Display '$display' is wished but not enumerated; skipping"
                 dict set displays $display missing
                 continue
             }
-            set ds [$drawLib initDisplay $display \
-                        $displayOpts(width) $displayOpts(height) \
-                        $displayOpts(refreshRate)]
+            set ds [drawLib::initDisplay $display \
+                        $displayOpts::width $displayOpts::height \
+                        $displayOpts::refreshRate]
             dict set displays $display $ds
-            Assert! display $display has width [$drawLib getDisplayWidth $ds] \
-                height [$drawLib getDisplayHeight $ds]
+            Assert! display $display has width [drawLib::getDisplayWidth $ds] \
+                height [drawLib::getDisplayHeight $ds]
 
         } elseif {[dict get $displays $display] eq "missing"} {
             # TODO: Allow for retry if display is plugged in later?
@@ -680,12 +701,12 @@ while true {
 
     # Make textures published while building the display list drawable
     # before we record display command buffers.
-    $gpuTextureLib drainDeferredTextureOps
+    gpuTextureLib::drainDeferredTextureOps
 
     # Draw to each active display.
     dict for {displayName ds} $displays {
         if {$ds eq "missing"} { continue }
-        $gpu drawStart $ds
+        gpu::drawStart $ds
 
         set drawCount 0
         foreach layer [lsort -real [dict keys $displayList]] {
@@ -693,16 +714,16 @@ while true {
             foreach displayCommand $layerDisplayList {
                 incr drawCount
                 try { {*}$displayCommand } \
-                    on error e { puts stderr [errorInfo $e] }
+                    on error {e opts} { puts stderr [errorInfoFor $e $opts] }
             }
         }
 
-        $gpu drawEnd
+        gpu::drawEnd
     }
 
     tracy frameMarkNamed $kGpu
 
-    if {$useGlfw} { $drawLib poll }
+    if {$useGlfw} { drawLib::poll }
     # TODO: sleep for 5ms or something?
 }
 

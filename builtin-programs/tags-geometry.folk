@@ -1,6 +1,6 @@
 When the default program geometry is /defaultGeom/ &\
      program /program/ is scaled by x /xScale/ y /yScale/ {
-    proc extractMm {mm} {
+    fn extractMm {mm} {
         regexp {([0-9.]+)mm} $mm -> extracted
         return $extracted
     }
@@ -35,18 +35,17 @@ When the default program geometry is /defaultGeom/ &\
         } elseif {[llength $results] == 0} {
             set geom $defaultGeom
         } else {
-            puts stderr "tags-to-quads: WARNING: Multiple geometries for $tag"
+            stream write $realStderr "tags-to-quads: WARNING: Multiple geometries for $tag\n"
             set geom [dict get [lindex $results 0] geom]
         }
 
-        local proc dim {x} {
+        fn dim {x} {
             return [expr {[string map {mm ""} $x] / 1000.0}]
         }
         dict for {k v} $geom { dict set geom $k [dim $v] }
-        dict with geom {
-            set width [expr {$left + $tagSize + $right}]
-            set height [expr {$top + $tagSize + $bottom}]
-        }
+        dict assign -all $geom
+        set width [expr {$left + $tagSize + $right}]
+        set height [expr {$top + $tagSize + $bottom}]
         dict set geom width $width
         dict set geom height $height
         # This (resolved geometry) feels like a hack.

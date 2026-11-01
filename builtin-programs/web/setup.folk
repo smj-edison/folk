@@ -1,4 +1,7 @@
-Wish the web server handles route "/setup" with nav "<button>Setup</button>" handler {
+Expect! the html library is /htmlLib/
+dict assign $htmlLib html HtmlWhen
+
+Wish the web server handles route "/setup" with nav "<button>Setup</button>" handler [fn {args} {
     html [subst {
 <!DOCTYPE html>
 <html>
@@ -72,9 +75,9 @@ folk.watchCollected(`/someone/ wishes the web server handles route "/setup" with
     <button onclick="dontUseDisplay()"><strong>Don't use a display</strong></button>
   </div>
 
-  [HtmlWhen $::thisNode has display /display/ with /...opts/ {
+  [HtmlWhen $thisNode has display /display/ with /...opts/ {
    HtmlWhen the collected results for \
-            [list /someone/ wishes $::thisNode uses display $display with /...usingOpts/] \
+            [list /someone/ wishes $thisNode uses display $display with /...usingOpts/] \
             are /results/ {
     set isUsingDisplay $([llength $results] >= 1)
     if {$isUsingDisplay} {
@@ -86,7 +89,7 @@ folk.watchCollected(`/someone/ wishes the web server handles route "/setup" with
 
     set modesByRegion [dict create]
     foreach mode [dict getdef $info modes [list]] {
-      dict lappend modesByRegion $mode(visibleRegion) $mode
+      dict lappend modesByRegion $mode::visibleRegion $mode
     }
     set regions [lsort -decreasing -integer -index 0 \
                      [dict keys $modesByRegion]]
@@ -101,7 +104,7 @@ folk.watchCollected(`/someone/ wishes the web server handles route "/setup" with
                  onchange="displayEnabledChange.call(this, event)">
           <strong>$displayName</strong><br>
           [if {[dict exists $info physicalResolution]} { subst {
-              (Physical resolution: [join $info(physicalResolution) x])
+              (Physical resolution: [join $info::physicalResolution x])
           } }]
         </label>
 
@@ -124,9 +127,9 @@ folk.watchCollected(`/someone/ wishes the web server handles route "/setup" with
                   <label>
                     <input type="radio" name="display-refreshRate-$displayId"
                            $([info exists usingOpts] && 
-                             $width == $usingOpts(width) &&
-                             $height == $usingOpts(height) &&
-                             $refreshRate == $usingOpts(refreshRate) ?
+                             $width == $usingOpts::width &&
+                             $height == $usingOpts::height &&
+                             $refreshRate == $usingOpts::refreshRate ?
                              "checked" : "")
                            data-display="$display"
                            value="width $width height $height refreshRate $refreshRate"
@@ -162,7 +165,7 @@ folk.watchCollected(`/someone/ wishes the web server handles route "/setup" with
      if (this.checked) {
        if (display === "glfw") {
          // glfw doesn't have any mode settings (for now).
-         folk.hold(`display \${display}`, `Wish \$::thisNode uses display "\${display}" with width 640 height 480 refreshRate -1`,
+         folk.hold(`display \${display}`, `Wish \$thisNode uses display "\${display}" with width 640 height 480 refreshRate -1`,
                    'builtin-programs/web/setup.folk', true);
        } else {
          const firstRefreshRateRadio = document.querySelector(
@@ -190,7 +193,7 @@ folk.watchCollected(`/someone/ wishes the web server handles route "/setup" with
      if (this.checked) {
        const display = this.dataset.display;
        const mode = this.value;
-       folk.hold(`display \${display}`, `Wish \$::thisNode uses display "\${display}" with \${mode}`,
+       folk.hold(`display \${display}`, `Wish \$thisNode uses display "\${display}" with \${mode}`,
                  'builtin-programs/web/setup.folk', true);
      }
      event.preventDefault();
@@ -222,9 +225,9 @@ folk.watchCollected(`/someone/ wishes the web server handles route "/setup" with
 </style>
 <div class="mode-select">
   <h2>Cameras</h2>
-  [HtmlWhen $::thisNode has camera /camera/ with /...opts/ {
+  [HtmlWhen $thisNode has camera /camera/ with /...opts/ {
    HtmlWhen the collected results for \
-            [list /someone/ wishes $::thisNode uses camera $camera with /...usingOpts/] \
+            [list /someone/ wishes $thisNode uses camera $camera with /...usingOpts/] \
             are /results/ {
     set isUsingCamera $([llength $results] >= 1)
     if {$isUsingCamera} {
@@ -236,13 +239,13 @@ folk.watchCollected(`/someone/ wishes the web server handles route "/setup" with
         # For now, we only support MJPG. The more raw formats are
         # rarely used by cameras at even medium resolutions and
         # framerates, anyway, so it's only worth supporting MJPG.
-        if {$format(fourcc) eq "MJPG"} {
-            lappend resolutions {*}$format(resolutions)
+        if {$format::fourcc eq "MJPG"} {
+            lappend resolutions {*}$format::resolutions
         }
     }
-    set resolutions [lsort -command {apply {{a b} {
+    set resolutions [lsort -command [fn {a b} {
         expr {[dict get $b width] - [dict get $a width]}
-    }}} $resolutions]
+    }] $resolutions]
 
     if {[llength $resolutions] == 0} {
       # Cameras often have extra camera devices with no formats (or no
@@ -275,13 +278,13 @@ folk.watchCollected(`/someone/ wishes the web server handles route "/setup" with
                     onclick="cameraResolutionClicked.call(this, event)">
                 ${resolution(width)}x${resolution(height)}
               </span>
-              [join [lmap framerate $resolution(framerates) { subst {
+              [join [lmap framerate $resolution::framerates { subst {
                 <label>
                   <input type="radio" name="camera-framerate-$cameraId"
                          $([info exists usingOpts] && 
-                           $resolution(width) == $usingOpts(width) &&
-                           $resolution(height) == $usingOpts(height) &&
-                           $framerate == $usingOpts(framerate) ?
+                           $resolution::width == $usingOpts::width &&
+                           $resolution::height == $usingOpts::height &&
+                           $framerate == $usingOpts::framerate ?
                            "checked" : "")
                          data-camera="$camera"
                          value="width ${resolution(width)} height ${resolution(height)} framerate $framerate"
@@ -295,7 +298,7 @@ folk.watchCollected(`/someone/ wishes the web server handles route "/setup" with
         
         [if {$isUsingCamera} {
           set iframeWidth 600
-          set cameraAreaHeight [expr {int(600.0 * $usingOpts(height) / $usingOpts(width))}]
+          set cameraAreaHeight [expr {int(600.0 * $usingOpts::height / $usingOpts::width)}]
           set iframeHeight [expr {$cameraAreaHeight + 48}]
           set existingCrops [dict getdef $usingOpts crops [list]]
           subst {
@@ -314,10 +317,10 @@ folk.watchCollected(`/someone/ wishes the web server handles route "/setup" with
                 set cy [dict get $c y]
                 set cw [dict get $c width]
                 set ch [dict get $c height]
-                set rx [expr {int($cx * $iframeWidth / $usingOpts(width))}]
-                set ry [expr {int($cy * $cameraAreaHeight / $usingOpts(height))}]
-                set rw [expr {int($cw * $iframeWidth / $usingOpts(width))}]
-                set rh [expr {int($ch * $cameraAreaHeight / $usingOpts(height))}]
+                set rx [expr {int($cx * $iframeWidth / $usingOpts::width)}]
+                set ry [expr {int($cy * $cameraAreaHeight / $usingOpts::height)}]
+                set rw [expr {int($cw * $iframeWidth / $usingOpts::width)}]
+                set rh [expr {int($ch * $cameraAreaHeight / $usingOpts::height)}]
                 set cropHtml [subst {
                   <div class="crop-box" data-index="$i" data-crop="$cx,$cy,$cw,$ch"
                        style="left: ${rx}px; top: ${ry}px;
@@ -374,7 +377,7 @@ folk.watchCollected(`/someone/ wishes the web server handles route "/setup" with
       if (this.checked) {
         const camera = this.dataset.camera;
         const format = this.value;
-        folk.hold(`camera \${camera}`, `Wish \$::thisNode uses camera "\${camera}" with \${format}`,
+        folk.hold(`camera \${camera}`, `Wish \$thisNode uses camera "\${camera}" with \${format}`,
                   'builtin-programs/web/setup.folk', true);
       }
       event.preventDefault();
@@ -411,7 +414,7 @@ folk.watchCollected(`/someone/ wishes the web server handles route "/setup" with
         .map((\[x,y,w,h]) => `{x \${x} y \${y} width \${w} height \${h}}`)
         .join(' ');
       folk.hold(`camera \${ctx.camera}`,
-        `Wish \$::thisNode uses camera "\${ctx.camera}" with \${ctx.format} crops {\${cropsTcl}}`,
+        `Wish \$thisNode uses camera "\${ctx.camera}" with \${ctx.format} crops {\${cropsTcl}}`,
         'builtin-programs/web/setup.folk', true);
     }
 
@@ -519,7 +522,7 @@ folk.watchCollected(`/someone/ wishes the web server handles route "/setup" with
 
   <fieldset style="margin: 10px 0; border: 1px solid #ccc; padding: 10px;">
     <legend><strong>Display (projector)</strong></legend>
-    [HtmlWhen /someone/ wishes $::thisNode uses display /display/ with /...opts/ {
+    [HtmlWhen /someone/ wishes $thisNode uses display /display/ with /...opts/ {
       subst {
         <div style="margin: 5px 0;">
           <label>
@@ -547,10 +550,10 @@ folk.watchCollected(`/someone/ wishes the web server handles route "/setup" with
         </div>
       }
     }] -->
-    [HtmlWhen /someone/ wishes $::thisNode uses camera /camera/ with /...opts/ {
+    [HtmlWhen /someone/ wishes $thisNode uses camera /camera/ with /...opts/ {
         if {[dict exists $opts crops]} {
             set htmls [list]
-            loop i [llength $opts(crops)] {
+            loop i [llength $opts::crops] {
                 lappend htmls [emitCameraHtml [list $camera $i]]
             }
             join $htmls \n
@@ -594,4 +597,4 @@ folk.watchCollected(`/someone/ wishes the web server handles route "/setup" with
 </body>
 </html>
 }]
-}
+}]

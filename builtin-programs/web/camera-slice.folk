@@ -1,5 +1,5 @@
 When the jpeg library is /jpegLib/ {
-    Wish the web server handles route {/camera-slice/([^/]+)$} with handler {
+    Wish the web server handles route {/camera-slice/([^/]+)$} with handler [fn {args} {
         set id [string map [list %20 " "] $1]
         Hold! -key [list camera-slice $id] Wish $id has camera slice
 
@@ -7,7 +7,7 @@ When the jpeg library is /jpegLib/ {
         set found false
         for {set i 0} {$i < 100} {incr i} {
             ForEach! $id has camera slice /slice/ {
-                $jpegLib saveAsJpeg $slice $filename
+                jpegLib::saveAsJpeg $slice $filename
                 set found true
 
                 # HACK: there's race risk here
@@ -22,9 +22,8 @@ When the jpeg library is /jpegLib/ {
         }
 
         set fsize [file size $filename]
-        set fd [open $filename r]
-        fconfigure $fd -translation binary
-        set data [read $fd $fsize]
+        set fd [file open $filename r]
+        set data [stream read $fd $fsize]
         close $fd
 
         dict create statusAndHeaders "HTTP/1.1 200 OK
@@ -32,5 +31,5 @@ Connection: close
 Content-Type: image/jpeg
 Content-Length: $fsize\n\n" \
             body $data
-    }
+    }]
 }

@@ -1,15 +1,14 @@
-When when the CRAFT text detector is /any/ /any/ with environment /any/ {
+When when the CRAFT text detector is /any/ /any/ {
     Wish -keep 500ms to load the CRAFT text detector
 }
 
 When /someone/ wishes to load the CRAFT text detector &\
      the image uvx argtype definer is /defineImageArgtype/ {
-    fn defineImageArgtype
 
     set py [Uvx --with pillow --with "git+https://github.com/osnr/craft-text-detector.git"]
     defineImageArgtype $py
 
-    $py exec {
+    py::exec {
         import torch
         import numpy as np
         from craft_text_detector import Craft
@@ -25,7 +24,7 @@ When /someone/ wishes to load the CRAFT text detector &\
         craft = Craft(output_dir=None, crop_type="box",
                       link_threshold=0.1, device=device)
     }
-    $py def detectTextBoxes {Image image} {
+    py::def detectTextBoxes {Image image} {
         image_np = np.array(image)
 
         start_craft = time.time()
@@ -38,7 +37,7 @@ When /someone/ wishes to load the CRAFT text detector &\
         return boxes.tolist() if hasattr(boxes, 'tolist') else boxes
     }
 
-    fn CRAFT {im} { return [$py detectTextBoxes $im] }
-    Claim the CRAFT text detector is [fn CRAFT]
+    fn CRAFT {im} { return [py::detectTextBoxes $im] }
+    Claim the CRAFT text detector is $CRAFT
 }
 

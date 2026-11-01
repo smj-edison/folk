@@ -1,3 +1,5 @@
+set math [import lib/math.tcl]
+
 set drawShapeSides [dict create \
     triangle 3 square 4 pentagon 5 hexagon 6 septagon 7 octagon 8 nonagon 9]
 
@@ -125,7 +127,7 @@ fn drawShapeRegularPolygon {center radius sides radians} {
     lassign $center cx cy
     set points [list]
     for {set i 0} {$i < $sides} {incr i} {
-        set theta [expr {$radians + $i * $::TAU / $sides - $::PI / 2.0}]
+        set theta [expr {$radians + $i * $math::TAU / $sides - $math::PI / 2.0}]
         lappend points [list [expr {$cx + $radius * cos($theta)}] \
                              [expr {$cy + $radius * sin($theta)}]]
     }

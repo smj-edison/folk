@@ -1,30 +1,27 @@
 When the jpeg library is /jpegLib/ {
-    Wish the web server handles route {/apriltag-frame} with handler {
+    Wish the web server handles route {/apriltag-frame} with handler [fn {args} {
         set frames [Query! camera /cam/ has frame /im/ at timestamp /ts/]
         set frame [lindex $frames end]
-        dict with frame {
-            StatementAcquire! $__ref
+        dict assign -all $frame
+        StatementAcquire! $__ref
 
-            set filename "/tmp/web-image-frame.jpg"
-            $jpegLib saveAsJpeg $im $filename
-            set fsize [file size $filename]
-            set fd [open $filename r]
-            fconfigure $fd -translation binary
-            set imageData [read $fd $fsize]
-            close $fd
+        set filename "/tmp/web-image-frame.jpg"
+        jpegLib::saveAsJpeg $im $filename
+        set fsize [file size $filename]
+        set fd [file open $filename r]
+        set imageData [stream read $fd $fsize]
+        close $fd
 
-            set tags [Query! tag /id/ has detection /det/ on camera $cam \
-                          at timestamp $ts]
-            puts "Tags: $tags"
+        set tags [Query! tag /id/ has detection /det/ on camera $cam \
+                      at timestamp $ts]
+        puts "Tags: $tags"
 
-            StatementRelease! $__ref
-        }
+        StatementRelease! $__ref
 
-        package require base64
         html [subst {
             <html>
             <body>
-            <img src="data:image/png;base64,[binary encode base64 $imageData]"
+            <img src="data:image/png;base64,[codec encode base64 $imageData]"
                  style="position:absolute;top:0;left:0">
             <svg width="100%" height="100%" style="position:absolute;top:0;left:0;pointer-events:none;">
                 [join [lmap tag $tags {
@@ -43,5 +40,5 @@ When the jpeg library is /jpegLib/ {
             </body>
             </html>
         }]
-    }
+    }]
 }

@@ -1,110 +1,88 @@
-set cc [C]
+set cc [dict link $C {}]
 
-$cc include <pthread.h>
-$cc include <assert.h>
-$cc include <stdio.h>
-$cc include <string.h>
-$cc include <unistd.h>
-$cc include "jim.h"
+cc::include <pthread.h>
+cc::include <assert.h>
+cc::include <stdio.h>
+cc::include <string.h>
+cc::include <unistd.h>
 
-$cc code {
-
-/* Generic string hash function from jim.c */
-static unsigned int cacheGenHashFunction(const unsigned char *string, int length) {
-    unsigned result = 0;
-    string += length;
-    while (length--) {
-        result += (result << 3) + (unsigned char)(*--string);
-    }
-    return result;
-}
-static unsigned int holdHTHashFunction(const void *key) {
-    return cacheGenHashFunction(key, strlen(key));
-}
-static void *holdHTKeyDup(void *privdata, const void *key) {
-    return strdup(key);
-}
-static void *holdHTValDup(void *privdata, const void *val) {
-    return strdup(val);
-}
-static int holdHTKeyCompare(void *privdata, const void *key1, const void *key2) {
-    return strcmp(key1, key2) == 0;
-}
-static void holdHTKeyDestructor(void *privdata, void *key) {
-    free(key);
-}
-static void holdHTValDestructor(void *privdata, void *val) {
-    free(val);
-}
-
-static const Jim_HashTableType holdHashTableType = {
-    .hashFunction = holdHTHashFunction,
-    .keyDup = holdHTKeyDup,
-    .valDup = holdHTValDup,
-    .keyCompare = holdHTKeyCompare,
-    .keyDestructor = holdHTKeyDestructor,
-    .valDestructor = holdHTValDestructor
-};
+cc::addcode {
 
 // key = value of -on passed to Hold!,
-// val = string that can be converted to a jim dict, with
-// that dict having its key = the value passed to -key
-// and its value = its corresponding held statement
-static Jim_HashTable holds;
+// val = a dict whose key = the value passed to -key
+// and whose value = its corresponding held statement
+static Zicl_Dict* holds = NULL;
 static int areHoldsInitialized = 0;
 
 static pthread_mutex_t holdMutex = PTHREAD_MUTEX_INITIALIZER;
 
+// Linear scan is fine here: `holds` has at most one entry per loaded/held
+// file, not a hot-path lookup.
+static Zicl_OptVal holdsGet(Zicl_Val key) {
+    int n = Zicl_DictLength(holds);
+    const Zicl_Val* items = Zicl_DictItems(holds);
+    for (int i = 0; i < n; i++) {
+        if (ziclEquals(items[2 * i], key)) return Zicl_Wrap(items[2 * i + 1]);
+    }
+    return ZICL_NONE;
 }
 
-$cc proc init {} void {
+}
+
+cc::proc init {} void {
     pthread_mutex_lock(&holdMutex);
     if (!areHoldsInitialized) {
         areHoldsInitialized = 1;
-        Jim_InitHashTable(&holds, &holdHashTableType, interp);
+        holds = ziclNewDict(NULL, 0);
     }
     pthread_mutex_unlock(&holdMutex);
 }
 
-$cc proc loadHolds {char* canonicalName char* holdStr} void {
+cc::proc loadHolds {char* canonicalName char* holdStr} void {
     pthread_mutex_lock(&holdMutex);
-    Jim_AddHashEntry(&holds, (const void *)canonicalName, (void *)holdStr);
+    Zicl_Val key = ziclNewString(canonicalName, -1);
+    Zicl_Val val = ziclNewString(holdStr, -1);
+    ziclDictPut(holds, key, val);
+    Zicl_DropRef(key);
+    Zicl_DropRef(val);
     pthread_mutex_unlock(&holdMutex);
 }
 
 # canonical, tclEscaped, and filename all have to do with the value from -on in Hold!
-$cc proc saveHold {char* canonical Jim_Obj* tclEscaped char* filename Jim_Obj* key Jim_Obj* clause} void {
+cc::proc saveHold {char* canonical Zicl_Val tclEscaped char* filename Zicl_Val key Zicl_Val clause} void {
     pthread_mutex_lock(&holdMutex);
     assert(areHoldsInitialized);
 
-    Jim_Obj* holdDict = NULL;
+    Zicl_Val canonicalKey = ziclNewString(canonical, -1);
 
-    Jim_HashEntry* he = Jim_FindHashEntry(&holds, canonical);
-    if (he == NULL) {
+    Zicl_Dict* holdDict;
+    Zicl_OptVal existing = holdsGet(canonicalKey);
+    if (Zicl_IsNone(existing)) {
         // this is this files' first hold
-        holdDict = Jim_NewDictObj(interp, NULL, 0);
+        holdDict = ziclNewDict(NULL, 0);
     } else {
-        holdDict = Jim_NewStringObj(interp, (char *)Jim_GetHashEntryVal(he), -1);
+        folkZiclAssert(Zicl_DupAsDict(interp, Zicl_Unwrap(existing), &holdDict));
     }
 
     // empty clause, e.g. removal
-    if (Jim_Length(clause) == 0) {
-        Jim_DictAddElement(interp, holdDict, key, NULL);
+    int clauseLen;
+    ziclGetString(clause, &clauseLen);
+    if (clauseLen == 0) {
+        bool removed;
+        folkZiclAssert(Zicl_DictRemove(holdDict, key, &removed));
     } else {
-        Jim_DictAddElement(interp, holdDict, key, clause);
+        ziclDictPut(holdDict, key, clause);
     }
 
-    if (he == NULL) {
-        Jim_AddHashEntry(&holds, (const void *)canonical, (void *)Jim_String(holdDict));
-    } else {
-        Jim_SetHashVal(&holds, he, (void *)Jim_String(holdDict));
-    }
+    Zicl_Val newHoldVal = Zicl_BoxDict(holdDict);
+    ziclDictPut(holds, canonicalKey, newHoldVal);
+    Zicl_DropRef(canonicalKey);
 
     // grab entries from dict
-    int dictLen = 0;
-    Jim_Obj** dictValues = Jim_DictPairs(interp, holdDict, &dictLen);
+    int pairCount = Zicl_DictLength(holdDict);
+    const Zicl_Val* dictItems = Zicl_DictItems(holdDict);
 
-    if (dictLen > 0) {
+    if (pairCount > 0) {
         // write changes
         char tmpFilename[4096];
         snprintf(tmpFilename, sizeof(tmpFilename), "%s.tmp.%ld.%lu",
@@ -114,18 +92,22 @@ $cc proc saveHold {char* canonical Jim_Obj* tclEscaped char* filename Jim_Obj* k
         assert(file != NULL);
 
         // write the filename in tcl form at the top of the file
-        fwrite(Jim_String(tclEscaped), 1, Jim_Length(tclEscaped), file);
+        int tclEscapedLen;
+        const char* tclEscapedStr = ziclGetString(tclEscaped, &tclEscapedLen);
+        fwrite(tclEscapedStr, 1, tclEscapedLen, file);
         fwrite("\n\n", 1, 2, file);
 
         // write all hash entries, with one entry per line
-        for (int i = 0; i < dictLen; i += 2) {
-            Jim_Obj* pair[] = { dictValues[i], dictValues[i + 1] };
-            Jim_Obj* tmpListObj = Jim_NewListObj(interp, pair, 2);
+        for (int i = 0; i < pairCount; i++) {
+            Zicl_Val pair[] = { dictItems[2 * i], dictItems[2 * i + 1] };
+            Zicl_Val pairList = Zicl_BoxList(ziclNewList(pair, 2));
 
-            fwrite(Jim_String(tmpListObj), 1, Jim_Length(tmpListObj), file);
+            int pairLen;
+            const char* pairStr = ziclGetString(pairList, &pairLen);
+            fwrite(pairStr, 1, pairLen, file);
             fwrite("\n", 1, 1, file);
 
-            Jim_FreeNewObj(interp, tmpListObj);
+            Zicl_DropRef(pairList);
         }
 
         fclose(file);
@@ -137,19 +119,19 @@ $cc proc saveHold {char* canonical Jim_Obj* tclEscaped char* filename Jim_Obj* k
         remove(filename); // no need to check error
     }
 
-    Jim_FreeNewObj(interp, holdDict);
+    Zicl_DropRefDict(holdDict);
     pthread_mutex_unlock(&holdMutex);
 }
 
-set savedHoldsLib [$cc compile]
-$savedHoldsLib init
+set savedHoldsLib [cc::compile]
+savedHoldsLib::init
 
 When /someone/ wishes to deserialize namespace hold with directory /directory/ {
     set holdFiles [glob -nocomplain $directory/*]
 
     foreach holdFile $holdFiles {
-        set fd [open $holdFile r]
-        set holds [read $fd]
+        set fd [file open $holdFile r]
+        set holds [stream read $fd]
         close $fd
 
         # the hold file's first line is its canonical name (since
@@ -162,7 +144,7 @@ When /someone/ wishes to deserialize namespace hold with directory /directory/ {
             Hold! -on $canonicalName -key $key -- {*}$clause
         }
 
-        $savedHoldsLib loadHolds $canonicalName $holdDict
+        savedHoldsLib::loadHolds $canonicalName $holdDict
     }
 
     Claim the saved holds are loaded
@@ -184,7 +166,7 @@ When the hold save directory is /holdDirectory/ {
         set escapedFilename [regsub -all -- / $escapedFilename __]
         set escapedFilename "$holdDirectory/$escapedFilename"
 
-        $savedHoldsLib saveHold $canonical $tclEscaped $escapedFilename \
+        savedHoldsLib::saveHold $canonical $tclEscaped $escapedFilename \
             $key $clause
     }
 

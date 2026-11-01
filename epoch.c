@@ -39,6 +39,8 @@ inline void tfree(void *ptr) {
 
 #endif
 
+#include <libzicl.h>
+
 #include "epoch.h"
 
 // See: https://aturon.github.io/blog/2015/08/27/epoch/#epoch-based-reclamation
@@ -51,6 +53,12 @@ typedef struct EpochGlobalGarbage {
     _Atomic int garbageNextIdx;
 } EpochGlobalGarbage;
 static EpochGlobalGarbage epochGlobalGarbage[3];
+
+typedef struct EpochGlobalDecrRefs {
+    Zicl_Obj* _Atomic decrRefs[EPOCH_GARBAGE_MAX];
+    _Atomic int decrRefsNextIdx;
+} EpochGlobalDecrRefs;
+static EpochGlobalDecrRefs epochGlobalDecrRefs[3];
 
 // Thread-specific state that needs to also be readable from the
 // collector thread.
@@ -76,6 +84,10 @@ static __thread int freesNextIdx;
 static __thread void *allocs[ALLOCS_MAX];
 static __thread int allocsNextIdx;
 
+#define DECR_REFS_MAX 1024
+static __thread Zicl_Obj *decrRefs[DECR_REFS_MAX];
+static __thread int decrRefsNextIdx;
+
 void epochThreadInit() {
     int threadIdx = -1;
     for (int i = 0; i < EPOCH_THREADS_MAX; i++) {
@@ -98,6 +110,7 @@ void epochThreadInit() {
 
     freesNextIdx = 0;
     allocsNextIdx = 0;
+    decrRefsNextIdx = 0;
 }
 void epochThreadDestroy() {
     threadState->inUse = false;
@@ -133,6 +146,14 @@ void epochFree(void *ptr) {
     }
     frees[idx] = ptr;
 }
+void epochDecrRef(Zicl_Obj *obj) {
+    int idx = decrRefsNextIdx++;
+    if (idx >= DECR_REFS_MAX) {
+        fprintf(stderr, "epochDecrRef: ran out of decr ref slots\n");
+        exit(1);
+    }
+    decrRefs[idx] = obj;
+}
 void epochReset() {
     // Free every allocation we've done this epoch.
     for (int i = 0; i < allocsNextIdx; i++) {
@@ -144,6 +165,10 @@ void epochReset() {
     // Throw away the whole frees list so it doesn't actually get
     // retired by the collector later.
     freesNextIdx = 0;
+
+    // Throw away deferred decrements — on retry, trieRemoveImpl will
+    // call epochDecrRef again for the same keys.
+    decrRefsNextIdx = 0;
 }
 static void epochRetireAll() {
     // Move all frees to global garbage list.
@@ -166,6 +191,19 @@ static void epochRetireAll() {
         g->garbage[gidx] = frees[i];
     }
     freesNextIdx = 0;
+
+    // Move all deferred Zicl_DropRef calls to global list.
+    EpochGlobalDecrRefs *d = &epochGlobalDecrRefs[epochGlobalCounter % 3];
+    for (int i = 0; i < decrRefsNextIdx; i++) {
+        int didx = d->decrRefsNextIdx++;
+        if (didx >= EPOCH_GARBAGE_MAX) {
+            fprintf(stderr, "epochRetireAll: ran out of global decrRefs slots (epoch %d).\n",
+                    epochGlobalCounter);
+            exit(1);
+        }
+        d->decrRefs[didx] = decrRefs[i];
+    }
+    decrRefsNextIdx = 0;
 }
 
 void epochEnd() {
@@ -200,4 +238,13 @@ void epochGlobalCollect() {
         free(g->garbage[i]);
     }
     g->garbageNextIdx = 0;
+
+    // Process deferred Zicl_DropRef calls from 2 epochs ago.
+    // At this point no reader thread is in that epoch, so keys are safe to release.
+    EpochGlobalDecrRefs *d = &epochGlobalDecrRefs[((freeableEpoch % 3) + 3) % 3];
+    int decrCount = d->decrRefsNextIdx;
+    for (int i = 0; i < decrCount; i++) {
+        Zicl_DropRef(Zicl_BoxObject(d->decrRefs[i]));
+    }
+    d->decrRefsNextIdx = 0;
 }

@@ -1,15 +1,14 @@
-When when the TrOCR text recognizer is /any/ /any/ with environment /any/ {
+When when the TrOCR text recognizer is /any/ /any/ {
     Wish -keep 500ms to load the TrOCR text recognizer
 }
 
 When /someone/ wishes to load the TrOCR text recognizer &\
      the image uvx argtype definer is /defineImageArgtype/ {
-    fn defineImageArgtype
 
     set py [Uvx --with transformers --with pillow --with torch --with protobuf]
     defineImageArgtype $py
 
-    $py exec {
+    py::exec {
         from transformers import TrOCRProcessor, VisionEncoderDecoderModel
         import os
         import sys
@@ -42,7 +41,7 @@ When /someone/ wishes to load the TrOCR text recognizer &\
         print(f"trocr: Using device: {device}", file=sys.stderr, flush=True)
     }
 
-    $py def ocrImage {Image image} {
+    py::def ocrImage {Image image} {
         start_time = time.time()
 
         # Run TrOCR on the entire image
@@ -57,7 +56,7 @@ When /someone/ wishes to load the TrOCR text recognizer &\
         return text
     }
 
-    fn TrOCR {im} { return [$py ocrImage $im] }
-    Claim the TrOCR text recognizer is [fn TrOCR]
+    fn TrOCR {im} { return [py::ocrImage $im] }
+    Claim the TrOCR text recognizer is $TrOCR
 }
 

@@ -27,15 +27,15 @@ else
 	LINKER := cc
 endif
 
-folk: workqueue.o db.o trie.o sysmon.o epoch.o folk.o output-redirection.o block-stats.o \
+folk: workqueue.o db.o trie.o sysmon.o epoch.o folk.o output-redirection.o block-stats.o zicl-helpers.o \
 	vendor/c11-queues/mpmc_queue.o vendor/c11-queues/memory.o \
-	vendor/jimtcl/libjim.a $(TRACY_TARGET) CFLAGS $(INTERPOSE_DYLIB)
+	vendor/zicl/zig-out/lib/libzicl.a $(TRACY_TARGET) CFLAGS $(INTERPOSE_DYLIB)
 
-	$(LINKER) -g -fno-omit-frame-pointer $(if $(ASAN_ENABLE),-fsanitize=address -fsanitize-recover=address,) -o$@ \
+	$(LINKER) -g3 -fno-omit-frame-pointer $(if $(filter Linux,$(shell uname)),-no-pie,) $(if $(ASAN_ENABLE),-fsanitize=address -fsanitize-recover=address,) $(if $(TSAN_ENABLE),-fsanitize=thread,) -o$@ \
 		$(CFLAGS) $(BUILTIN_CFLAGS) \
-		-L./vendor/jimtcl \
+		-L./vendor/zicl/zig-out/lib \
 		$(filter %.o %.a,$^) \
-		-ljim -lm -lssl -lcrypto -lz $(INTERPOSE_LDFLAGS)
+		-lzicl -lm -lz $(INTERPOSE_LDFLAGS)
 	if [ "$$(uname)" = "Darwin" ]; then \
 		dsymutil $@; \
 	fi
@@ -44,15 +44,15 @@ folk: workqueue.o db.o trie.o sysmon.o epoch.o folk.o output-redirection.o block
 		(sudo -n true 2>/dev/null && sudo setcap cap_sys_rawio+ep $@) || true; \
 	fi
 
-%.o: %.c trie.h workqueue.h CFLAGS
-	cc -c -O2 -g -fno-omit-frame-pointer $(if $(ASAN_ENABLE),-fsanitize=address -fsanitize-recover=address,) -o$@  \
+%.o: %.c trie.h workqueue.h zicl-helpers.h common.h CFLAGS
+	cc -c -O2 -g3 -fno-omit-frame-pointer $(if $(ASAN_ENABLE),-fsanitize=address -fsanitize-recover=address,) $(if $(TSAN_ENABLE),-fsanitize=thread,) -o$@  \
 		-D_GNU_SOURCE -U_FORTIFY_SOURCE $(CFLAGS) $(BUILTIN_CFLAGS) \
-		$< -I./vendor/jimtcl -I./vendor/tracy/public
+		$< -I./vendor/tracy/public -I./vendor/zicl/zig-out/include
 
-folk_interpose.dylib: output-redirection.c
+folk_interpose.dylib: output-redirection.c common.h
 	cc -dynamiclib -undefined dynamic_lookup \
 		-install_name @executable_path/folk_interpose.dylib \
-		-O2 -g -fno-omit-frame-pointer \
+		-O2 -g3 -fno-omit-frame-pointer \
 		-DFOLK_INTERPOSE_DYLIB \
 		-o $@ $<
 
@@ -92,17 +92,14 @@ debug: folk
 clean:
 	rm -f folk *.o *.dylib vendor/tracy/public/TracyClient.o vendor/c11-queues/*.o
 distclean: clean
-	make -C vendor/jimtcl distclean
+	rm -Rf vendor/zicl/.zig-cache vendor/zicl/zig-out
 
 remote-clean: sync
 	ssh $(FOLK_REMOTE_NODE) -- 'cd folk; make clean'
 remote-distclean: sync
 	ssh $(FOLK_REMOTE_NODE) -- 'cd folk; make distclean'
 deps:
-	if [ ! -f vendor/jimtcl/Makefile ]; then \
-		cd vendor/jimtcl && ./configure CFLAGS='-g -fno-omit-frame-pointer'; \
-	fi
-	make -C vendor/jimtcl
+	zig build --build-file ./vendor/zicl/build.zig -Dstatic-link=false -Dtrace-mem=false -Doptimize=ReleaseSafe
 
 
 kill-folk:
@@ -110,8 +107,11 @@ kill-folk:
 	if [ -f folk.pid ]; then \
 		OLD_PID=`cat folk.pid`; \
 		pkill -9 --pgroup $$OLD_PID; \
-		sudo pkill -9 --pgroup $$OLD_PID; \
-		while sudo pkill -0 --pgroup $$OLD_PID; do sleep 0.2; done; \
+		if sudo -n pkill -9 --pgroup $$OLD_PID; then \
+			while sudo -n pkill -0 --pgroup $$OLD_PID; do sleep 0.2; done; \
+		else \
+			while pkill -0 --pgroup $$OLD_PID; do sleep 0.2; done; \
+		fi; \
 	fi
 
 FOLK_REMOTE_NODE ?= folk-live
@@ -127,13 +127,14 @@ sync:
 		--exclude='vendor/tracy/public/TracyClient.o' \
 		--include='vendor/tracy/public/***' \
 		--exclude='vendor/tracy/*' \
+		--exclude='vendor/zicl' \
 		--exclude-from='.git/ignores.tmp' \
 		./ $(FOLK_REMOTE_NODE):~/folk/
 
 remote-setup:
 	ssh-copy-id $(FOLK_REMOTE_NODE)
 	make sync
-	ssh $(FOLK_REMOTE_NODE) -- 'sudo usermod -a -G tty folk && chmod +rwx ~/folk-calibration-poses; sudo apt update && sudo apt install libssl-dev gdb libwslay-dev google-perftools libgoogle-perftools-dev linux-perf && cd folk/vendor/jimtcl && make distclean; ./configure CFLAGS="-g -fno-omit-frame-pointer"'
+	ssh $(FOLK_REMOTE_NODE) -- 'sudo usermod -a -G tty folk && chmod +rwx ~/folk-calibration-poses; sudo apt update && sudo apt install libssl-dev gdb libwslay-dev google-perftools libgoogle-perftools-dev linux-perf'
 
 remote: sync
 	ssh $(FOLK_REMOTE_NODE) -- 'cd folk; make kill-folk; make deps && make start CFLAGS="$(CFLAGS)" ASAN_ENABLE=$(ASAN_ENABLE)'

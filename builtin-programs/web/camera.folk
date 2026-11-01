@@ -1,4 +1,4 @@
-Wish the web server handles route {/camera} with handler {
+Wish the web server handles route {/camera} with handler [fn {args} {
     if {[dict exists $QUERY camera]} {
         set camera [dict get $QUERY camera]
     } else {
@@ -12,7 +12,7 @@ Wish the web server handles route {/camera} with handler {
                 <p>Choose a camera:</p>
                 <ul>
                 [join [lmap result $cameraResults { subst {
-                    <li><a href="/camera?camera=[string map [list / %2F " " %20] $result(camera)]">$result(camera)</a></li>
+                    <li><a href="/camera?camera=[string map [list / %2F " " %20] $result::camera]">$result::camera</a></li>
                 } }] \n]
                 </ul>
                 </body>
@@ -96,4 +96,4 @@ Wish the web server handles route {/camera} with handler {
   </body>
 </html>
     }]
-}
+}]

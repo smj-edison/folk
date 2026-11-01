@@ -1,31 +1,16 @@
-set UVX "$::env(HOME)/.local/bin/uvx"
+set UVX "$env::HOME/.local/bin/uvx"
 if {![file exists $UVX]} { set UVX "uvx" }
 
-proc UvxCleanup {pid endpoint} {
-    # `uvx` may keep the real Python worker as a child process. Kill children
-    # first, then the wrapper. Both commands are best-effort because the worker
-    # may already have exited by the time the match is retracted.
-    catch {exec pkill -TERM -P $pid}
-    catch {kill SIGTERM $pid}
-    catch {kill $pid}
-    catch {file delete -force $endpoint}
+set cc [dict link $C {}]
+cc::include <sys/socket.h>
+cc::include <sys/un.h>
+cc::include <unistd.h>
+cc::include <pthread.h>
+cc::include <string.h>
+cc::include <stdlib.h>
 
-    after 1000 [list apply {{pid} {
-        catch {exec pkill -KILL -P $pid}
-        catch {kill SIGKILL $pid}
-    }} $pid]
-}
-
-set cc [C]
-$cc include <sys/socket.h>
-$cc include <sys/un.h>
-$cc include <unistd.h>
-$cc include <pthread.h>
-$cc include <string.h>
-$cc include <stdlib.h>
-
-$cc proc sockConnect {char* path} int {
-    for (int i = 0; i < 200; i++) {
+cc::proc sockConnect {char* path} int {
+    for (int i = 0; i < 1000; i++) {
         int fd = socket(AF_UNIX, SOCK_STREAM, 0);
         if (fd < 0) { usleep(1000000); continue; }
         struct sockaddr_un addr;
@@ -38,11 +23,35 @@ $cc proc sockConnect {char* path} int {
         close(fd);
         usleep(1000000);
     }
-    Jim_SetResultString(interp, "sockConnect: failed to connect", -1);
+    Zicl_SetResultString(interp, "sockConnect: failed to connect", -1);
     return -1;
 }
 
-$cc proc sockSendStr {int fd char* data} void {
+# Returns this thread's connection to `endpoint`, dialing on first use.
+cc::proc sockForEndpoint {char* endpoint} int {
+    for (int i = 0; i < 16; i++) {
+        if (threadSockets[i].key[0] != '\0' &&
+            strcmp(threadSockets[i].key, endpoint) == 0) {
+            return threadSockets[i].fd;
+        }
+    }
+
+    int slot = -1;
+    for (int i = 0; i < 16; i++) {
+        if (threadSockets[i].key[0] == '\0') { slot = i; break; }
+    }
+    if (slot == -1) { FOLK_ERROR("sockForEndpoint: no free slots\n"); }
+
+    int fd = sockConnect(endpoint);
+    if (fd < 0) { FOLK_ERROR("sockForEndpoint: failed to connect to %s\n", endpoint); }
+
+    strncpy(threadSockets[slot].key, endpoint, ENDPOINT_MAX - 1);
+    threadSockets[slot].key[ENDPOINT_MAX - 1] = '\0';
+    threadSockets[slot].fd = fd;
+    return fd;
+}
+
+cc::proc sockSendStr {int fd char* data} void {
     uint32_t len = (uint32_t)strlen(data);
     // HACK: should check these.
 #pragma GCC diagnostic push
@@ -52,14 +61,14 @@ $cc proc sockSendStr {int fd char* data} void {
 #pragma GCC diagnostic pop
 }
 
-$cc proc sockRecvMulti {int fd} Jim_Obj* {
-    Jim_Obj *result = Jim_NewListObj(interp, NULL, 0);
+cc::proc sockRecvMulti {int fd} Zicl_Val {
+    Zicl_List* result = ziclNewList(NULL, 0);
     while (1) {
         uint32_t len = 0;
         int got = 0;
         while (got < 4) {
             int n = read(fd, ((char*)&len) + got, 4 - got);
-            if (n <= 0) return result;
+            if (n <= 0) return Zicl_BoxList(result);
             got += n;
         }
         if (len == 0) break;
@@ -67,66 +76,78 @@ $cc proc sockRecvMulti {int fd} Jim_Obj* {
         got = 0;
         while ((uint32_t)got < len) {
             int n = read(fd, buf + got, len - got);
-            if (n <= 0) { free(buf); return result; }
+            if (n <= 0) { free(buf); return Zicl_BoxList(result); }
             got += n;
         }
         buf[len] = '\0';
-        Jim_ListAppendElement(interp, result, Jim_NewStringObj(interp, buf, len));
+        ziclListAppend(result, ziclNewString(buf, len));
         free(buf);
     }
-    return result;
+    return Zicl_BoxList(result);
 }
 
 # These need to be maintained in C so that they can be written and
 # read from multiple threads (any thread may call into the Python
 # module at any time).
-$cc code {
+cc::addcode {
     // This C module is global, so we need to maintain a separate
     // functions/registeredArgtypes per uvx (per endpoint).
 
     #define ENDPOINT_MAX 256
 
-    typedef struct EndpointStringKV {
+    typedef struct EndpointKV {
         char key[ENDPOINT_MAX];
-        char* value;
-    } EndpointStringKV;
+        Zicl_Val value;
+    } EndpointKV;
 
-    EndpointStringKV registeredArgtypes[64];
+    EndpointKV registeredArgtypes[64];
     pthread_mutex_t registeredArgtypesMutex = PTHREAD_MUTEX_INITIALIZER;
 
-    EndpointStringKV functions[64];
+    EndpointKV functions[64];
     pthread_mutex_t functionsMutex = PTHREAD_MUTEX_INITIALIZER;
+
+    // One connection per (thread, endpoint). The wire protocol is
+    // length-prefixed request/response, so two Folk workers sharing an fd
+    // would interleave frames and desync it. Thread-local because a Folk
+    // value is shared across worker threads, so the fd cannot ride along in
+    // the library dict the way it did under Jim's per-thread namespaces.
+    typedef struct EndpointSocket {
+        char key[ENDPOINT_MAX];
+        int fd;
+    } EndpointSocket;
+    _Thread_local EndpointSocket threadSockets[16];
 }
-$cc proc getFunctions {char* endpoint} char* {
+cc::proc getFunctions {char* endpoint} Zicl_Val {
     pthread_mutex_lock(&functionsMutex);
     for (int i = 0; i < 64; i++) {
-        if (strcmp(functions[i].key, endpoint) == 0) {
-            char* result = functions[i].value;
+        if (functions[i].key[0] != '\0' && strcmp(functions[i].key, endpoint) == 0) {
+            Zicl_Val result = Zicl_Ref(functions[i].value);
             pthread_mutex_unlock(&functionsMutex);
-            return result ? result : "";
+            return result;
         }
     }
     pthread_mutex_unlock(&functionsMutex);
-    return "";
+    return Zicl_BoxDict(ziclNewDict(NULL, 0));
 }
-$cc proc getRegisteredArgtypes {char* endpoint} char* {
+cc::proc getRegisteredArgtypes {char* endpoint} Zicl_Val {
     pthread_mutex_lock(&registeredArgtypesMutex);
     for (int i = 0; i < 64; i++) {
-        if (strcmp(registeredArgtypes[i].key, endpoint) == 0) {
-            char* result = registeredArgtypes[i].value;
+        if (registeredArgtypes[i].key[0] != '\0' && strcmp(registeredArgtypes[i].key, endpoint) == 0) {
+            Zicl_Val result = Zicl_Ref(registeredArgtypes[i].value);
             pthread_mutex_unlock(&registeredArgtypesMutex);
-            return result ? result : "";
+            return result;
         }
     }
     pthread_mutex_unlock(&registeredArgtypesMutex);
-    return "";
+    return Zicl_BoxDict(ziclNewDict(NULL, 0));
 }
-$cc proc setFunctions {char* endpoint char* value} void {
+cc::proc setFunctions {char* endpoint Zicl_Val value} void {
+    Zicl_MakeCrossthread(value);
     pthread_mutex_lock(&functionsMutex);
 
     int slot = -1;
     for (int i = 0; i < 64; i++) {
-        if (strcmp(functions[i].key, endpoint) == 0) {
+        if (functions[i].key[0] != '\0' && strcmp(functions[i].key, endpoint) == 0) {
             slot = i;
             break;
         }
@@ -140,21 +161,22 @@ $cc proc setFunctions {char* endpoint char* value} void {
         FOLK_ERROR("setFunctions: No free slots\n");
     }
 
-    if (functions[slot].value) {
-        free(functions[slot].value);
+    if (functions[slot].key[0] != '\0') {
+        Zicl_DropRef(functions[slot].value);
     }
     strncpy(functions[slot].key, endpoint, ENDPOINT_MAX - 1);
     functions[slot].key[ENDPOINT_MAX - 1] = '\0';
-    functions[slot].value = strdup(value);
+    functions[slot].value = Zicl_Ref(value);
 
     pthread_mutex_unlock(&functionsMutex);
 }
-$cc proc setRegisteredArgtypes {char* endpoint char* value} void {
+cc::proc setRegisteredArgtypes {char* endpoint Zicl_Val value} void {
+    Zicl_MakeCrossthread(value);
     pthread_mutex_lock(&registeredArgtypesMutex);
 
     int slot = -1;
     for (int i = 0; i < 64; i++) {
-        if (strcmp(registeredArgtypes[i].key, endpoint) == 0) {
+        if (registeredArgtypes[i].key[0] != '\0' && strcmp(registeredArgtypes[i].key, endpoint) == 0) {
             slot = i;
             break;
         }
@@ -168,19 +190,58 @@ $cc proc setRegisteredArgtypes {char* endpoint char* value} void {
         FOLK_ERROR("setRegisteredArgtypes: No free slots\n");
     }
 
-    if (registeredArgtypes[slot].value) {
-        free(registeredArgtypes[slot].value);
+    if (registeredArgtypes[slot].key[0] != '\0') {
+        Zicl_DropRef(registeredArgtypes[slot].value);
     }
     strncpy(registeredArgtypes[slot].key, endpoint, ENDPOINT_MAX - 1);
     registeredArgtypes[slot].key[ENDPOINT_MAX - 1] = '\0';
-    registeredArgtypes[slot].value = strdup(value);
+    registeredArgtypes[slot].value = Zicl_Ref(value);
 
     pthread_mutex_unlock(&registeredArgtypesMutex);
 }
+cc::proc cleanupEndpoint {char* endpoint} void {
+    pthread_mutex_lock(&functionsMutex);
+    for (int i = 0; i < 64; i++) {
+        if (functions[i].key[0] != '\0' && strcmp(functions[i].key, endpoint) == 0) {
+            functions[i].key[0] = '\0';
+            Zicl_DropRef(functions[i].value);
+            break;
+        }
+    }
+    pthread_mutex_unlock(&functionsMutex);
 
-set impl [$cc compile]
+    pthread_mutex_lock(&registeredArgtypesMutex);
+    for (int i = 0; i < 64; i++) {
+        if (registeredArgtypes[i].key[0] != '\0' && strcmp(registeredArgtypes[i].key, endpoint) == 0) {
+            registeredArgtypes[i].key[0] = '\0';
+            Zicl_DropRef(registeredArgtypes[i].value);
+            break;
+        }
+    }
+    pthread_mutex_unlock(&registeredArgtypesMutex);
+}
 
-proc Uvx args {impl UVX} {
+set impl [cc::compile]
+
+fn UvxCleanup {process endpoint} {
+    # `uvx` may keep the real Python worker as a child process. Kill children
+    # first, then the wrapper. Both commands are best-effort because the worker
+    # may already have exited by the time the match is retracted.
+    catch {
+        if {[catch {pid $process} pids]} {
+            set pids [list $process]
+        }
+        foreach p $pids {
+            catch {exec pkill -TERM -P $p}
+            catch {exec kill $p}
+        }
+    }
+    catch {close $process}
+    catch {impl::cleanupEndpoint $endpoint}
+    catch {file delete -force $endpoint}
+}
+
+fn Uvx args {
     set endpoint "/tmp/uvx-[clock milliseconds]-[expr {int(rand() * 100000)}].sock"
     set folkPid [pid]
 
@@ -196,23 +257,40 @@ import time
 folk_pid = $folkPid
 uvx_parent_pid = os.getppid()
 
-def process_is_zombie(pid):
+def process_has_live_threads(pid):
+    if not sys.platform.startswith("linux"):
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
+
     try:
-        with open(f"/proc/{pid}/stat") as f:
-            return f.read().split()[2] == "Z"
+        thread_ids = os.listdir(f"/proc/{pid}/task")
     except OSError:
         return False
+
+    # On Linux, the process-group leader can become a zombie after its
+    # pthread exits while other threads in the same process keep running.
+    # Folk's main thread is also worker 0, so normal match cancellation can
+    # create exactly that state.  Do not mistake it for the whole process
+    # exiting.
+    for thread_id in thread_ids:
+        try:
+            with open(f"/proc/{pid}/task/{thread_id}/stat") as f:
+                if f.read().split()[2] != "Z":
+                    return True
+        except (OSError, IndexError):
+            # Threads may disappear while we inspect the task directory.
+            continue
+    return False
 
 def exit_when_parent_is_gone():
     while True:
         time.sleep(1)
         if os.getppid() != uvx_parent_pid:
             os._exit(0)
-        try:
-            os.kill(folk_pid, 0)
-        except OSError:
-            os._exit(0)
-        if process_is_zombie(folk_pid):
+        if not process_has_live_threads(folk_pid):
             os._exit(0)
 
 threading.Thread(target=exit_when_parent_is_gone, daemon=True).start()
@@ -330,133 +408,140 @@ while True:
                  python -u -c $harnessCode &]
     # HACK: This is a bit of Folk poking down into the library level,
     # which is awkward.
-    catch { uplevel [list On unmatch [list UvxCleanup $pid $endpoint]] } res
+    catch { On unmatch { UvxCleanup $pid $endpoint } } res
 
     # Return a library that runs internal state through the Folk db so
     # it can be called from any thread.
-    return [library create uvx {impl endpoint} {
+    # The library is a plain dict of closures. Everything below is defined as
+    # an ordinary local first and only assembled into the dict at the end, so
+    # each one captures this frame and can call the ones above it by name.
+    # Nothing here may be named `exec` or `eval`: this frame calls both.
 
-variable impl
-variable endpoint
-# We need to boot a new socket when this library is loaded onto a new
-# thread. Do that now.
-variable socket [$impl sockConnect $endpoint]
-if {$socket < 0} { error "Uvx: failed to connect to Python at $endpoint" }
+    fn pyGetFunctions {} { return [impl::getFunctions $endpoint] }
+    fn pyGetRegisteredArgtypes {} { return [impl::getRegisteredArgtypes $endpoint] }
 
-proc getFunctions {} {
-    variable impl; variable endpoint
-    return [$impl getFunctions $endpoint] }
-proc getRegisteredArgtypes {} {
-    variable impl; variable endpoint
-    return [$impl getRegisteredArgtypes $endpoint]
-}
-proc registerFunction {fnName fnInfo} {
-    variable impl; variable endpoint
-    set functions [$impl getFunctions $endpoint]
-    dict set functions $fnName $fnInfo
-    $impl setFunctions $endpoint $functions
-}
-proc registerArgtype {typeName serializer} {
-    variable impl; variable endpoint
-    set argtypes [$impl getRegisteredArgtypes $endpoint]
-    dict set argtypes $typeName $serializer
-    $impl setRegisteredArgtypes $endpoint $argtypes
-}
-
-proc unknown {fnName args} {
-    variable impl; variable socket; variable endpoint
-    # We need normal `unknown` to call methods on $impl, so need to
-    # pass it through to ::unknown.
-    if {$fnName eq $impl} {
-        tailcall ::unknown $fnName {*}$args
+    fn pyRegisterFunction {fnName fnInfo} {
+        set functions [impl::getFunctions $endpoint]
+        dict set functions $fnName $fnInfo
+        impl::setFunctions $endpoint $functions
+    }
+    fn pyRegisterArgtype {typeName serializer} {
+        set argtypes [impl::getRegisteredArgtypes $endpoint]
+        dict set argtypes $typeName $serializer
+        impl::setRegisteredArgtypes $endpoint $argtypes
     }
 
-    # Send function name first
-    $impl sockSendStr $socket $fnName
+    fn pyCall {fnName args} {
+        # Dialed per thread, since a Folk value is shared across workers and a
+        # shared fd would interleave frames on this request/response protocol.
+        set socket [impl::sockForEndpoint $endpoint]
 
-    # Check if this function has registered types
-    set functions [getFunctions]
-    set registeredArgtypes [getRegisteredArgtypes]
-    if {[dict exists $functions $fnName]} {
-        set fnInfo [dict get $functions $fnName]
-        set argTypes [dict get $fnInfo argTypes]
+        # Send function name first
+        impl::sockSendStr $socket $fnName
 
-        # Send each argument according to its type
-        foreach schema $argTypes arg $args {
-            # Check if this is a custom argtype
-            if {[dict exists $registeredArgtypes $schema]} {
-                set serializerCode [dict get $registeredArgtypes $schema]
-                apply [list {socket arg} $serializerCode] $socket $arg
-            } else {
-                # Use JSON encoding
-                set encoded [json::encode $arg $schema]
-                $impl sockSendStr $socket $encoded
+        # Check if this function has registered types
+        set functions [pyGetFunctions]
+        set registeredArgtypes [pyGetRegisteredArgtypes]
+        if {[dict exists $functions $fnName]} {
+            set fnInfo [dict get $functions $fnName]
+            set argTypes [dict get $fnInfo argTypes]
+
+            # Send each argument according to its type
+            foreach schema $argTypes arg $args {
+                # Check if this is a custom argtype
+                if {[dict exists $registeredArgtypes $schema]} {
+                    # A closure rather than a code string: zicl's [apply] has no
+                    # `{argList body}` lambda form. It round-trips through the C
+                    # slot as its string, scope hash and all.
+                    apply [dict get $registeredArgtypes $schema] $socket $arg
+                } else {
+                    # Use JSON encoding
+                    set encoded [json::encode $arg $schema]
+                    impl::sockSendStr $socket $encoded
+                }
             }
+
+        } else {
+            # No type info, send args as strings
+            foreach arg $args { impl::sockSendStr $socket $arg }
         }
 
-    } else {
-        # No type info, send args as strings
-        foreach arg $args { $impl sockSendStr $socket $arg }
+        # Send terminator.
+        impl::sockSendStr $socket ""
+
+        set response [impl::sockRecvMulti $socket]
+        if {[llength $response] == 0} {
+            error "Python worker at $endpoint closed the connection"
+        }
+
+        lassign $response status value
+        if {$status eq "error"} { error $value }
+        if {$status eq "okb"} { return $value }
+        if {$status ne "ok"} {
+            error "Python worker at $endpoint returned invalid response: $response"
+        }
+        return [json::decode $value]
     }
 
-    # Send terminator.
-    $impl sockSendStr $socket ""
+    fn pyExec {code} {
+        lassign [info source $code] file line
+        if {$file eq ""} { set file "<unknown>"; set line 1 }
+        return [pyCall "__exec__" [textutil::adjust::undent $code] $file $line]
+    }
+    fn pyEval {code} { return [pyCall "eval" $code] }
 
-    set response [$impl sockRecvMulti $socket]
-    if {[llength $response] == 0} {
-        error "Python worker at $endpoint closed the connection"
+    # `serializer` is a closure taking {socket arg}; `deserializer` is Python
+    # source that reads from `socket` and returns the value.
+    fn pyArgtype {typeName serializer deserializer} {
+        # Store the Tcl serializer:
+        pyRegisterArgtype $typeName $serializer
+        # Store the Python deserializer:
+        pyCall __register_argtype__ $typeName $deserializer
     }
 
-    lassign $response status value
-    if {$status eq "error"} { error $value }
-    if {$status eq "okb"} { return $value }
-    if {$status ne "ok"} {
-        error "Python worker at $endpoint returned invalid response: $response"
+    # A method, so that the closure it defines lands in the caller's own copy
+    # of the library dict: `$py::def foo` writes `foo` back into `$py`.
+    method pyDef {self fnName argSpec body} {
+        lassign [info source $body] file line
+        if {$file eq ""} { set file "<unknown>"; set line 1 }
+
+        # Parse argument specification: {Type1 name1 Type2 name2 ...}
+        set argNames {}
+        set argTypes {}
+        foreach {argType argName} $argSpec {
+            lappend argNames $argName
+            lappend argTypes $argType
+        }
+
+        # Store function metadata
+        pyRegisterFunction $fnName [dict create \
+            argNames $argNames \
+            argTypes $argTypes]
+
+        # Register function signature with Python
+        pyCall __register_function__ $fnName {*}$argTypes
+
+        # Strip common leading whitespace and add function body indentation
+        set dedented [textutil::adjust::undent $body]
+        set indentedBody [textutil::adjust::indent $dedented "    "]
+        # If body is empty, add pass statement
+        if {[string trim $indentedBody] eq ""} {
+            set indentedBody "    pass\n"
+        }
+        # line - 1 because the def header line takes the place of the opening brace
+        pyCall "__exec__" "def $fnName\([join $argNames ", "]):\n$indentedBody" $file [expr {$line - 1}]
+
+        # Bind it as a real key, so `$py::$fnName` is an ordinary dict lookup
+        # rather than something an [unknown] handler has to intercept.
+        dict set self $fnName [fn args { return [pyCall $fnName {*}$args] }]
     }
-    return [json::decode $value]
-}
-proc exec {code} {
-    lassign [info source $code] file line
-    if {$file eq ""} { set file "<unknown>"; set line 1 }
-    return [unknown "__exec__" [undent $code] $file $line]
-}
-proc eval {code} { return [unknown "eval" $code] }
 
-proc argtype {typeName serializer deserializer} {
-    # Store the Tcl serializer:
-    registerArgtype $typeName $serializer
-    # Store the Python deserializer:
-    __register_argtype__ $typeName $deserializer
-}
-proc def {fnName argSpec body} {
-    lassign [info source $body] file line
-    if {$file eq ""} { set file "<unknown>"; set line 1 }
-
-    # Parse argument specification: {Type1 name1 Type2 name2 ...}
-    set argNames {}
-    set argTypes {}
-    foreach {argType argName} $argSpec {
-        lappend argNames $argName
-        lappend argTypes $argType
-    }
-
-    # Store function metadata
-    registerFunction $fnName [dict create \
-        argNames $argNames \
-        argTypes $argTypes]
-
-    # Register function signature with Python
-    __register_function__ $fnName {*}$argTypes
-
-    # Strip common leading whitespace and add function body indentation
-    set dedented [undent $body]
-    set indentedBody [indent $dedented "    "]
-    # If body is empty, add pass statement
-    if {[string trim $indentedBody] eq ""} {
-        set indentedBody "    pass\n"
-    }
-    # line - 1 because the def header line takes the place of the opening brace
-    unknown "__exec__" "def $fnName\([join $argNames ", "]):\n$indentedBody" $file [::expr {$line - 1}]
-}
-    }]
+    return [dict create \
+                call $pyCall \
+                exec $pyExec \
+                eval $pyEval \
+                argtype $pyArgtype \
+                def $pyDef \
+                getFunctions $pyGetFunctions \
+                getRegisteredArgtypes $pyGetRegisteredArgtypes]
 }

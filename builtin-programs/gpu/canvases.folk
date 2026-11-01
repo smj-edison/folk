@@ -2,23 +2,24 @@ When the GPU library is /gpuLib/ &\
      the image library is /imageLib/ &\
      the GPU pipeline library is /pipelineLib/ &\
      the GPU texture library is /gpuTextureLib/ {
-    set gpuc [C]
-    $gpuc include <pthread.h>
-    $gpuc cflags -I./vendor
-    $gpuc code {
+    set gpuc [dict link $C {}]
+    gpuc::include <pthread.h>
+    gpuc::include <string.h>
+    gpuc::addcflags -I./vendor
+    gpuc::addcode {
         #define VOLK_IMPLEMENTATION
         #include "volk/volk.h"
     }
 
-    $gpuc extend -noprocs $gpuLib
-    $gpuc import $gpuLib VkResultToString
-    $gpuc import $gpuLib getCommandBuffer
+    gpuc::extend -noprocs $gpuLib
+    gpuc::import $gpuLib VkResultToString
+    gpuc::import $gpuLib getCommandBuffer
 
-    $gpuc extend $imageLib
-    $gpuc extend -noprocs $pipelineLib
-    $gpuc extend $gpuTextureLib
+    gpuc::extend $imageLib
+    gpuc::extend -noprocs $pipelineLib
+    gpuc::extend $gpuTextureLib
 
-    local proc vktry {call} { string map {\n " "} [csubst {{
+    fn vktry {call} { string map {\n " "} [csubst {{
         VkResult res = $call;
         if (res != VK_SUCCESS) {
             fprintf(stderr, "Failed $call: %s (%d)\n",
@@ -26,7 +27,7 @@ When the GPU library is /gpuLib/ &\
         }
     }}] }
 
-    $gpuc code {
+    gpuc::addcode {
         VkDevice device;
         // Canvas format must match the pipeline render pass format
         // (VK_FORMAT_B8G8R8A8_UNORM) so that shared pipelines are
@@ -36,7 +37,7 @@ When the GPU library is /gpuLib/ &\
         // This render pass is used to draw on all canvases.
         VkRenderPass renderPass;
     }
-    $gpuc proc init {} void {
+    gpuc::proc init {} void {
         $[vktry volkInitialize()]
         volkLoadInstanceOnly(*instance_ptr());
 
@@ -86,8 +87,9 @@ When the GPU library is /gpuLib/ &\
         }
     }
 
-    $gpuc code {
+    gpuc::addcode {
         typedef struct GpuCanvas {
+            Zicl_CapHead head;
             VkExtent2D extent;
 
             GpuTextureHandle gpuTexture;
@@ -95,12 +97,52 @@ When the GPU library is /gpuLib/ &\
 
             VkFence inFlightFence;
         } GpuCanvas;
+    } :extend
+    gpuc::objtype GpuCanvas {
+        static void GpuCanvas_deinitBody(Zicl_CapHead* head) {
+            GpuCanvas* wi = Zicl_ContainerOf(head, GpuCanvas, head);
+            freeGpuTexture(wi->gpuTexture);
+            vkDestroyFramebuffer(device, wi->framebuffer, NULL);
+            vkDestroyFence(device, wi->inFlightFence, NULL);
+        }
+
+        static void GpuCanvas_destroyBacking(Zicl_CapHead* head) {
+            free(Zicl_ContainerOf(head, GpuCanvas, head));
+        }
+
+        static const Zicl_CapHeadVTable GpuCanvas_vtable = {
+            .name = "gpu-canvas",
+            .deinit_body = GpuCanvas_deinitBody,
+            .destroy_backing = GpuCanvas_destroyBacking,
+        };
+        const Zicl_CapHeadVTable* GpuCanvas_VTable = &GpuCanvas_vtable;
+
+        static inline GpuCanvas* GpuCanvas_unwrap(Zicl_Interp* interp, Zicl_Shim* shim) {
+            Zicl_CapHead* head = NULL;
+            __ENSURE_OK(Zicl_ResolveCap(interp, shim, GpuCanvas_VTable, &head));
+            __capCleanupDefer(head);
+            return Zicl_ContainerOf(head, GpuCanvas, head);
+        }
+
+        static inline Zicl_Val GpuCanvas_wrap(GpuCanvas* wi) {
+            memset(&wi->head, 0, sizeof(wi->head));
+            wi->head.vtable = GpuCanvas_VTable;
+            Zicl_Val out;
+            folkZiclAssert(Zicl_CapNew(&wi->head, &out));
+            return out;
+        }
     }
-    $gpuc proc gpuTexture {GpuCanvas* wi} GpuTextureHandle {
+    gpuc::argtype GpuCanvas* {
+        GpuCanvas* $argname = GpuCanvas_unwrap(interp, $shim);
+    }
+    gpuc::rtype GpuCanvas* {
+        $robj = GpuCanvas_wrap($rvalue);
+    }
+    gpuc::proc gpuTexture {GpuCanvas* wi} GpuTextureHandle {
         return wi->gpuTexture;
     }
 
-    $gpuc proc create {int width int height} GpuCanvas* {
+    gpuc::proc create {int width int height} GpuCanvas* {
         GpuCanvas* wi = malloc(sizeof(GpuCanvas));
         wi->extent.width = width; wi->extent.height = height;
 
@@ -133,18 +175,15 @@ When the GPU library is /gpuLib/ &\
 
         return wi;
     }
-    $gpuc proc destroy {GpuCanvas* wi} void {
-        freeGpuTexture(wi->gpuTexture);
-        vkDestroyFramebuffer(device, wi->framebuffer, NULL);
-        vkDestroyFence(device, wi->inFlightFence, NULL);
-        free(wi);
+    gpuc::proc destroy {GpuCanvas* wi} void {
+        Zicl_CapClose(&wi->head);
     }
-    $gpuc code {
+    gpuc::addcode {
         __thread GpuCanvas* boundCanvas;
         __thread VkPipeline boundPipeline;
         __thread VkDescriptorSet boundDescriptorSet;
     }
-    $gpuc proc drawStart {GpuCanvas* wi} void {
+    gpuc::proc drawStart {GpuCanvas* wi} void {
         FOLK_ENSURE(boundCanvas == NULL);
         boundCanvas = wi;
 
@@ -183,7 +222,38 @@ When the GPU library is /gpuLib/ &\
         boundPipeline = VK_NULL_HANDLE;
         boundDescriptorSet = VK_NULL_HANDLE;
     }
-    $gpuc proc draw {Pipeline pipeline Jim_Obj* argsObj} void {
+    gpuc::addcode {
+        // Process-local binary values owned by Zicl, not serialized draw commands.
+        // Cached handles are only used while their pipeline statement is acquired.
+        typedef struct EncodedDraw {
+            Pipeline pipeline;
+            uint8_t pushConstantsData[128];
+        } EncodedDraw;
+    }
+    gpuc::proc encodeDraw {Pipeline pipeline Zicl_Val argsObj} Zicl_Val {
+        EncodedDraw draw = { .pipeline = pipeline };
+        FOLK_ENSURE(pipeline.pushConstantsSize <= sizeof(draw.pushConstantsData));
+        FOLK_ENSURE(pipeline.pushConstantsSize % 4 == 0);
+        int size = pipeline.encodePushConstants->encode(interp, argsObj, draw.pushConstantsData);
+        if (size == -1) {
+            FOLK_ABORT();
+        }
+        if (size != pipeline.pushConstantsSize) {
+            FOLK_ERROR("encodeDraw: Expected push constants size %zu; encoded size was %d\n",
+                       pipeline.pushConstantsSize, size);
+        }
+        return ziclNewString((const char*)&draw, sizeof(draw));
+    }
+    gpuc::proc drawEncoded {Zicl_Val drawVal} void {
+        size_t len;
+        const char* bytes = ziclGetString(drawVal, &len);
+        FOLK_ENSURE(len == sizeof(EncodedDraw));
+        // Zicl's byte storage need not have the alignment of an EncodedDraw.
+        EncodedDraw draw;
+        memcpy(&draw, bytes, sizeof(draw));
+        Pipeline pipeline = draw.pipeline;
+        FOLK_ENSURE(pipeline.pushConstantsSize <= sizeof(draw.pushConstantsData));
+        FOLK_ENSURE(pipeline.pushConstantsSize % 4 == 0);
         VkCommandBuffer commandBuffer = getCommandBuffer();
 
         if (boundPipeline != pipeline.pipeline) {
@@ -212,25 +282,22 @@ When the GPU library is /gpuLib/ &\
             boundDescriptorSet = *textureDescriptorSet_ptr();
         }
 
-        {
-            uint8_t pushConstantsData[128];
-            int pushConstantsDataSize = pipeline.encodePushConstants->encode(interp, argsObj, pushConstantsData);
-            if (pushConstantsDataSize == -1) {
-                FOLK_ABORT();
-            }
-            if (pushConstantsDataSize != pipeline.pushConstantsSize) {
-                FOLK_ERROR("drawImpl: Expected push constants size %zu; push constants data size was %d\n",
-                           pipeline.pushConstantsSize, pushConstantsDataSize);
-            }
+        if (pipeline.pushConstantsSize != 0) {
             vkCmdPushConstants(commandBuffer, pipeline.pipelineLayout,
                                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
-                               pipeline.pushConstantsSize, pushConstantsData);
+                               pipeline.pushConstantsSize, draw.pushConstantsData);
         }
 
         // 1 quad -> 2 triangles -> 6 vertices
         vkCmdDraw(commandBuffer, 6, 1, 0, 0);
     }
-    $gpuc proc drawEnd {} void {
+    # Keep the uncached entry point for callers outside the frame handler.
+    gpuc::proc draw {Pipeline pipeline Zicl_Val argsVal} void {
+        Zicl_Val encoded = encodeDraw(pipeline, argsVal);
+        drawEncoded(encoded);
+        Zicl_DropRef(encoded);
+    }
+    gpuc::proc drawEnd {} void {
         VkCommandBuffer commandBuffer = getCommandBuffer();
 
         vkCmdEndRenderPass(commandBuffer);
@@ -259,10 +326,10 @@ When the GPU library is /gpuLib/ &\
         boundCanvas = NULL;
     }
 
-    set gpuCanvasLib [$gpuc compile]
+    set gpuCanvasLib [gpuc::compile]
     Claim the GPU canvas library is $gpuCanvasLib
 
-    $gpuCanvasLib init
+    gpuCanvasLib::init
 
     # `id` is arbitrarily chosen by the caller:
     When /someone/ wishes the GPU creates canvas /id/ with /...options/ {
@@ -272,164 +339,172 @@ When the GPU library is /gpuLib/ &\
         dict set options height [dict getdef $options height 1024]
         dict set options settle [dict getdef $options settle 3ms]
 
-        set wi [$gpuCanvasLib create $options(width) $options(height)]
+        set wi [gpuCanvasLib::create $options::width $options::height]
 
         Claim the GPU has created canvas $id with \
             {*}$options \
-            texture [$gpuCanvasLib gpuTexture $wi] \
+            texture [gpuCanvasLib::gpuTexture $wi] \
             writableInfo $wi \
-            -destructor [list $gpuCanvasLib destroy $wi]
+            -destructor [list gpuCanvasLib::destroy $wi]
 
         Wish to collect results for \
             [list /wisher/ wishes the GPU draws pipeline /name/ \
                  onto canvas $id with /...options/] \
-            with settle $options(settle)
+            with settle $options::settle
     }
 
-    Wish the GPU runs frame prelude handler [list apply {{gpuCanvasLib gpuTextureLib} {
+    Wish the GPU runs frame prelude handler [fn {} {
         upvar missingPipelines missingPipelines
-        upvar mostRecentDrawListsByTexture mostRecentDrawListsByTexture
-        if {![info exists missingCanvases]} {
-            set missingCanvases [dict create]
+        upvar mostRecentDrawCache mostRecentDrawCache
+        if {![info exists missingPipelines]} {
+            set missingPipelines [dict create]
         }
-        if {![info exists mostRecentDrawListsByTexture]} {
-            set mostRecentDrawListsByTexture [dict create]
+        if {![info exists mostRecentDrawCache]} {
+            set mostRecentDrawCache [dict create]
         }
-
-        set results [Query! the GPU compiles pipeline /name/ to /pipeline/]
-        set pipelines [dict create]
-        foreach result $results { dict with result { dict set pipelines $name $pipeline } }
-
+        set thisDrawCache [dict create]
         set acquiredRefs [list]
 
-        set results [Query! the GPU has created canvas /id/ with /...options/]
-        set canvases [dict create]
-        foreach result $results { dict with result {
-            set ref [dict get $result __ref]
-            try {
-                StatementAcquire! $ref
-                lappend acquiredRefs $ref
-            } on error e {
-                continue
+        try {
+            set results [Query! the GPU compiles pipeline /name/ to /pipeline/]
+            set pipelines [dict create]
+            foreach result $results {
+                dict assign -all $result
+                set ref [dict get $result __ref]
+                try {
+                    StatementAcquire! $ref
+                    lappend acquiredRefs $ref
+                } on error e {
+                    continue
+                }
+                dict set pipelines $name $pipeline
             }
 
-            dict with options {
+            set results [Query! the GPU has created canvas /id/ with /...options/]
+            set canvases [dict create]
+            foreach result $results {
+                dict assign -all $result
+                set ref [dict get $result __ref]
+                try {
+                    StatementAcquire! $ref
+                    lappend acquiredRefs $ref
+                } on error e {
+                    continue
+                }
+
+                dict assign -all $options
                 dict set canvases $id $writableInfo
             }
-        } }
 
-        # Discard cached draw-lists for canvases that
-        # have been destroyed, since we'll want to re-draw them
-        # if/when they get re-created.
-        foreach id [dict keys $mostRecentDrawListsByTexture] {
-            if {![dict exists $canvases $id]} {
-                dict unset mostRecentDrawListsByTexture $id
-            }
-        }
-
-        local proc addToDrawLists {&drawLists pipelineName options} {
-            upvar gpuCanvasLib gpuCanvasLib
-            upvar pipelines pipelines
-            upvar missingPipelines missingPipelines
-
-            if {![dict exists $pipelines $pipelineName]} {
-                if {![dict exists $missingPipelines $pipelineName]} {
-                    puts stderr "canvases: Missing pipeline $pipelineName"
-                    dict set missingPipelines $pipelineName true
+            dict for {id wi} $canvases {
+                set resultsList [Query! the collected results for \
+                                     [list /wisher/ wishes the GPU draws pipeline /name/ \
+                                          onto canvas $id with /...options/] are /results/]
+                if {[llength $resultsList] == 0} {
+                    # Leave the last completed pixels alone. This is not the same
+                    # as an acquired collection with zero results, which clears it.
+                    continue
                 }
-                continue
-            }
-            dict unset missingPipelines $pipelineName
-            set pipeline [dict get $pipelines $pipelineName]
 
-            set layer [dict getdef $options layer 0]
-            if {[dict exists $options instances]} {
-                set instances [dict get $options instances]
-            } else {
-                set instances [list [dict get $options arguments]]
-            }
-            foreach instance $instances {
-                dict lappend drawLists $layer \
-                    [list $gpuCanvasLib draw $pipeline $instance]
-            }
-        }
-
-        set drawListsByTexture [dict create]
-        dict for {id wi} $canvases {
-            set resultsList [Query! the collected results for \
-                                 [list /wisher/ wishes the GPU draws pipeline /name/ \
-                                      onto canvas $id with /...options/] are /results/]
-            if {[llength $resultsList] == 0} {
-                # No collect statement present. Just reuse the
-                # last draw list. (Note: this is _not_ the same as
-                # a collect statement being present with 0 results
-                # inside it, where we actually shouldn't display
-                # anything, not reuse the last draw list.)
-                dict set drawListsByTexture $id \
-                    [dict getdef $mostRecentDrawListsByTexture $id [list]]
-                continue
-            }
-
-            dict set drawListsByTexture $id [list]
-
-            set resultsStmt [lindex $resultsList 0]
-            set ref [dict get $resultsStmt __ref]
-            try {
-                StatementAcquire! $ref
-                lappend acquiredRefs $ref
-                set results [dict get $resultsStmt results]
-
-            } on error e {
-                # Couldn't acquire the collect statement (it
-                # must have just been invalidated). Just reuse
-                # the last one.
-                dict set drawListsByTexture $id \
-                    [dict getdef $mostRecentDrawListsByTexture $id [list]]
-                continue
-            }
-
-            foreach result $results { dict with result {
+                set resultsStmt [lindex $resultsList 0]
+                set ref [dict get $resultsStmt __ref]
                 try {
-                    addToDrawLists drawListsByTexture($id) \
-                        $name $options
+                    StatementAcquire! $ref
+                    lappend acquiredRefs $ref
+                    set results [dict get $resultsStmt results]
+
                 } on error e {
-                    puts stderr "Error: GPU draws pipeline $name: [errorInfo $e]"
-                    Assert! $this claims $wisher has error $e with info [errorInfo $e]
-                    # TODO: does this ever get disposed?
+                    # It was invalidated since the query. Don't clear the canvas.
+                    continue
                 }
-            } }
-        }
 
-        # Image texture wishes can publish draw commands while their
-        # descriptor writes are still queued. Drain before recording
-        # canvas command buffers so those handles are drawable.
-        $gpuTextureLib drainDeferredTextureOps
+                # Sort statements, not individual glyphs. Preserve result/instance
+                # order within a layer, including repeated identical draws.
+                set resultsByLayer [dict create]
+                foreach result $results {
+                    dict assign -all $result
+                    try {
+                        dict lappend resultsByLayer [dict getdef $options layer 0] $result
+                    } on error {e opts} {
+                        stream write $realStderr "Error: GPU draws pipeline $name: [errorInfoFor $e $opts]\n"
+                        Assert! $this claims $wisher has error $e with info [dict get $opts -errorstack]
+                        # TODO: does this ever get disposed?
+                    }
+                }
 
-        dict for {id drawLists} $drawListsByTexture {
-            if {[dict exists $mostRecentDrawListsByTexture $id] &&
-                ($drawLists eq $mostRecentDrawListsByTexture($id))} {
-                continue
-            }
-            set wi [dict get $canvases $id]
-            $gpuCanvasLib drawStart $wi
-
-            foreach layer [lsort -real [dict keys $drawLists]] {
-                set layerDrawList [dict get $drawLists $layer]
-                foreach drawCommand $layerDrawList {
-                    try { {*}$drawCommand } \
-                        on error e { puts stderr [errorInfo $e] }
+                set layers [lsort -real [dict keys $resultsByLayer]]
+                # Flush after acquiring this collection: it may contain textures
+                # published since the previous canvas was queried/drawn.
+                gpuTextureLib::drainDeferredTextureOps
+                gpuCanvasLib::drawStart $wi
+                try {
+                    foreach layer $layers {
+                        foreach result [dict get $resultsByLayer $layer] {
+                            dict assign -all $result
+                            try {
+                                if {![dict exists $pipelines $name]} {
+                                    if {![dict exists $missingPipelines $name]} {
+                                        stream write $realStderr "canvases: Missing pipeline $name\n"
+                                        dict set missingPipelines $name true
+                                    }
+                                    continue
+                                }
+                                dict unset missingPipelines $name
+                                set pipeline [dict get $pipelines $name]
+                                # Nest by compiled pipeline value, then argument value.
+                                # Reuse the instance's string without constructing a
+                                # composite list key. Pipeline edits still invalidate.
+                                set previousPipelineDrawCache [dict getdef $mostRecentDrawCache $pipeline {}]
+                                set pipelineDrawCache [dict getdef $thisDrawCache $pipeline {}]
+                                # Own the mutable inner dict while filling it, so
+                                # per-instance inserts don't copy a shared dict.
+                                dict unset thisDrawCache $pipeline
+                                if {[dict exists $options instances]} {
+                                    set instances [dict get $options instances]
+                                } else {
+                                    set instances [list [dict get $options arguments]]
+                                }
+                                foreach instance $instances {
+                                    try {
+                                        # The common hit is in the previous frame.
+                                        # EncodedDraw is a nonempty binary struct, so
+                                        # an empty value is an unambiguous cache miss.
+                                        set encoded [dict getdef $previousPipelineDrawCache $instance {}]
+                                        if {$encoded eq {}} {
+                                            set encoded [dict getdef $pipelineDrawCache $instance {}]
+                                            if {$encoded eq {}} {
+                                                set encoded [gpuCanvasLib::encodeDraw $pipeline $instance]
+                                            }
+                                        }
+                                        dict set pipelineDrawCache $instance $encoded
+                                        gpuCanvasLib::drawEncoded $encoded
+                                    } on error {e opts} { stream write $realStderr "[errorInfoFor $e $opts]\n" }
+                                }
+                                if {[dict size $pipelineDrawCache]} {
+                                    dict set thisDrawCache $pipeline $pipelineDrawCache
+                                }
+                            } on error {e opts} {
+                                stream write $realStderr "Error: GPU draws pipeline $name: [errorInfoFor $e $opts]\n"
+                                Assert! $this claims $wisher has error $e with info [dict get $opts -errorstack]
+                            }
+                        }
+                    }
+                } finally {
+                    # drawEnd waits for completion before the acquired resources
+                    # can be released, even if processing a draw raised an error.
+                    gpuCanvasLib::drawEnd
                 }
             }
 
-            $gpuCanvasLib drawEnd
-
-            dict set mostRecentDrawListsByTexture $id $drawLists
+            # Entries unused this frame are released by Jim. Cached bytes do not
+            # keep retracted drawing wishes active or require manual allocation.
+            set mostRecentDrawCache $thisDrawCache
+        } finally {
+            foreach ref $acquiredRefs {
+                StatementRelease! $ref
+            }
         }
-
-        foreach ref $acquiredRefs {
-            StatementRelease! $ref
-        }
-    }} $gpuCanvasLib $gpuTextureLib]
+    }]
 
     When /someone/ wishes /p/ has a canvas {
         Wish $p has a canvas with width 1024 height 1024 settle 3ms

@@ -1,88 +1,149 @@
-When libapriltag has been built with config /configCcWithLibapriltag/ {
-fn configCcWithLibapriltag
+When libapriltag has been built with C prototype /Apriltag/ {
 
 # We try to use the AprilTag matrix library (instead of tcllib linalg)
 # to do matrix/homography operations in the live calibration inner
 # loop, to help with performance:
-set cc [C]
-configCcWithLibapriltag $cc
-$cc include <math.h>
-$cc include <common/matd.h>
-$cc include <common/homography.h>
+set cc [dict link $Apriltag {}]
+cc::include <math.h>
+cc::include <common/matd.h>
+cc::include <common/homography.h>
 
-$cc code {
-    extern Jim_ObjType matd_ObjType;
-    void matd_freeIntRepProc(Jim_Interp *interp, Jim_Obj *objPtr) {
-        matd_destroy((matd_t*) objPtr->internalRep.ptr);
-    }
-    void matd_dupIntRepProc(Jim_Interp *interp, Jim_Obj *srcPtr, Jim_Obj *dupPtr) {
-        dupPtr->internalRep.ptr = (void*) matd_copy((matd_t*) srcPtr->internalRep.ptr);
-    }
-    void matd_updateStringProc(Jim_Obj *objPtr) {
-        matd_t *mat = (matd_t *)objPtr->internalRep.ptr;
+# A native object type for `matd_t*`. The object's inline body holds the
+# `matd_t*` itself (the matrix is variable-size, so it stays behind the
+# pointer rather than living in the body), and the type shimmers both ways:
+# a Tcl list-of-lists converts into a matrix, and a matrix renders back out
+# as `{a b c} {d e f}`.
+cc::objtype matd {
+    extern const Zicl_ObjVTable* matd_VTable;
 
-        objPtr->bytes = Jim_Alloc(mat->nrows * (1 + mat->ncols * 26 + 1));
-        char *s = objPtr->bytes;
-        int i = 0;
-        
+    static matd_t* matd_fromObject(const Zicl_Obj* obj) {
+        return *(matd_t**) Zicl_ObjBodyConst(obj);
+    }
+
+    void matd_freeIntRepProc(Zicl_Obj* objPtr) {
+        matd_destroy(*(matd_t**) Zicl_ObjBody(objPtr));
+    }
+    Zicl_Obj* matd_dupIntRepProc(const Zicl_Obj* srcPtr) {
+        void* body = NULL;
+        Zicl_Obj* newObject = Zicl_NewObj(matd_VTable, sizeof(matd_t*), &body);
+        if (newObject == NULL) return NULL;
+        *(matd_t**) body = matd_copy(matd_fromObject(srcPtr));
+        return newObject;
+    }
+    int matd_updateStringProc(Zicl_Obj* objPtr) {
+        matd_t* mat = matd_fromObject(objPtr);
+
+        // Worst case per element: "-1.234567e-308 " and similar, so 26 bytes
+        // is ample; plus the braces and separator around each row.
+        size_t cap = (size_t)mat->nrows * (mat->ncols * 26 + 3) + 1;
+        char* s = malloc(cap);
+        if (s == NULL) return ZICL_OOM;
+        defer { free(s); }
+
+        size_t i = 0;
         for (unsigned int row = 0; row < mat->nrows; row++) {
+            if (row > 0) s[i++] = ' ';
             s[i++] = '{';
             for (unsigned int col = 0; col < mat->ncols; col++) {
-                int n = snprintf(&s[i], 26,
-                                 "%f ", MATD_EL(mat, row, col));
-                FOLK_ENSURE(n <= 26); i += n;
+                if (col > 0) s[i++] = ' ';
+                i += snprintf(&s[i], cap - i, "%f", MATD_EL(mat, row, col));
             }
             s[i++] = '}';
         }
         s[i] = 0;
-        objPtr->length = strlen(s);
-    }
-    int matd_setFromAnyProc(Jim_Interp *interp, Jim_Obj *objPtr) {
-        // shimmer into a list, then iterate
-        int nrows; Jim_Obj *rowObj0;
-        nrows = Jim_ListLength(interp, objPtr);
-        __ENSURE(nrows > 0);
-        __ENSURE_OK(Jim_ListIndex(interp, objPtr, 0, &rowObj0, false));
-        int ncols = Jim_ListLength(interp, rowObj0);
-        __ENSURE(ncols > 0);
 
-        matd_t *mat = matd_create(nrows, ncols);
+        return Zicl_SetObjectString(objPtr, s, (int)i);
+    }
+
+    /* Shimmers `shim` to a matd, parsing a list-of-lists if it isn't one
+       already. The returned matrix stays owned by the shimmered value.
+
+       `rc` is what the matrix's cleanup guard keys off, so every fallible
+       call below goes through ZICL_TRY and every bail-out returns through
+       `return (rc = ...)`. A bare `return ZICL_ERR` would leave `rc` at
+       ZICL_OK and leak the matrix, so the assignment is kept inside the
+       return rather than as a separate step that can drift apart from it. */
+    int matd_shimmerFrom(Zicl_Interp* interp, Zicl_Shim* shim, matd_t** out) {
+        void* body = Zicl_AsObjBody(Zicl_Current(shim), matd_VTable);
+        if (body) { *out = *(matd_t**) body; return ZICL_OK; }
+
+        int rc = ZICL_OK;
+
+        const Zicl_List* rows;
+        ZICL_TRY(Zicl_ShimmerToList(interp, shim, &rows), rc);
+        int nrows = Zicl_ListLength(rows);
+        if (nrows <= 0) return (rc = ZICL_ERR);
+        const Zicl_Val* rowValues = Zicl_ListItems(rows);
+
+        // Column count comes from the first row; the rest must agree.
+        int ncols;
+        {
+            Zicl_Shim row0 = Zicl_NewShim(rowValues[0]);
+            defer { Zicl_ShimDiscardChanges(&row0); }
+            const Zicl_List* row0List;
+            ZICL_TRY(Zicl_ShimmerToList(interp, &row0, &row0List), rc);
+            ncols = Zicl_ListLength(row0List);
+        }
+        if (ncols <= 0) return (rc = ZICL_ERR);
+
+        matd_t* mat = matd_create(nrows, ncols);
+        if (mat == NULL) return (rc = ZICL_OOM);
+        // Ownership transfers to the shimmered value on success, so this only
+        // fires on the failing paths.
+        defer { if (rc != ZICL_OK) matd_destroy(mat); }
+
         for (int row = 0; row < nrows; row++) {
-            Jim_Obj *rowObj;
-            __ENSURE_OK(Jim_ListIndex(interp, objPtr, row, &rowObj, false));
-            int rowCols = Jim_ListLength(interp, rowObj);
-            __ENSURE(rowCols == ncols);
+            Zicl_Shim rowShim = Zicl_NewShim(rowValues[row]);
+            defer { Zicl_ShimDiscardChanges(&rowShim); }
+
+            const Zicl_List* rowList;
+            ZICL_TRY(Zicl_ShimmerToList(interp, &rowShim, &rowList), rc);
+            if (Zicl_ListLength(rowList) != ncols) return (rc = ZICL_ERR);
+
+            const Zicl_Val* cells = Zicl_ListItems(rowList);
             for (int col = 0; col < ncols; col++) {
-                Jim_Obj *elObj;
-                __ENSURE_OK(Jim_ListIndex(interp, rowObj, col, &elObj, false));
-                __ENSURE_OK(Jim_GetDouble(interp, elObj, &MATD_EL(mat, row, col)));
+                Zicl_Shim cell = Zicl_NewShim(cells[col]);
+                defer { Zicl_ShimDiscardChanges(&cell); }
+                ZICL_TRY(Zicl_GetDouble(interp, &cell, &MATD_EL(mat, row, col)), rc);
             }
         }
-        objPtr->typePtr = &matd_ObjType;
-        objPtr->internalRep.ptr = mat;
-        return JIM_OK;
+
+        // Converts `shim` in place, so the list rep is replaced by ours.
+        void* newBody = Zicl_PrepareToShimmer(shim, matd_VTable);
+        if (newBody == NULL) return (rc = ZICL_OOM);
+        *(matd_t**) newBody = mat;
+        *out = mat;
+        return ZICL_OK;
     }
-    Jim_ObjType matd_ObjType = (Jim_ObjType) {
+
+    static const Zicl_ObjVTable matd_vtable = {
+        .is_c_vtable = true,
         .name = "matd_t*",
-        .freeIntRepProc = matd_freeIntRepProc,
-        .dupIntRepProc = matd_dupIntRepProc,
-        .updateStringProc = matd_updateStringProc,
-        /* .setFromAnyProc = matd_setFromAnyProc, */
+        .duplicate = matd_dupIntRepProc,
+        .free_internal_rep = matd_freeIntRepProc,
+        .update_string = matd_updateStringProc,
+        // Nothing in the body another thread could race on: the matrix is
+        // immutable once built, and holds no Zicl_Vals.
+        .make_crossthread = Zicl_NoopMakeCrossthread,
+        .enumerate_struct = NULL
     };
+    const Zicl_ObjVTable* matd_VTable = &matd_vtable;
 }
-$cc argtype matd_t* {
-    __ENSURE_OK(matd_setFromAnyProc(interp, $obj));
+cc::argtype matd_t* {
     matd_t* $argname;
-    $argname = (matd_t*) $obj->internalRep.ptr;
+    __ENSURE_OK(matd_shimmerFrom(interp, $shim, &$argname));
 }
-$cc rtype matd_t* {
-    $robj = Jim_NewObj(interp);
-    $robj->bytes = NULL;
-    $robj->typePtr = &matd_ObjType;
-    $robj->internalRep.ptr = $rvalue;
+cc::rtype matd_t* {
+    {
+        void* body = NULL;
+        Zicl_Obj* obj = Zicl_NewObj(matd_VTable, sizeof(matd_t*), &body);
+        if (obj == NULL) folkZiclAssert(ZICL_OOM);
+        *(matd_t**) body = $rvalue;
+        $robj = Zicl_BoxObject(obj);
+    }
 }
 
-$cc proc computeNormalizer {int nPoints float points[][2]} matd_t* {
+cc::proc computeNormalizer {int nPoints float points[][2]} matd_t* {
     double cx = 0, cy = 0;
     for (int i = 0; i < nPoints; i++) {
         cx += points[i][0]; cy += points[i][1];
@@ -109,7 +170,7 @@ $cc proc computeNormalizer {int nPoints float points[][2]} matd_t* {
     return normalizer;
 }
 
-$cc code {
+cc::addcode {
     static void homographyProject(const matd_t *H, double x, double y, double *ox, double *oy)
     {
         double xx = MATD_EL(H, 0, 0)*x + MATD_EL(H, 0, 1)*y + MATD_EL(H, 0, 2);
@@ -131,18 +192,18 @@ $cc code {
 #
 # Returns a 3x3 homography that maps model (x, y) to image (u, v)
 # (using homogeneous coordinates).
-$cc code {
+cc::addcode {
     static matd_t *estimateHomographyBaseImpl(int nPointPairs, float pointPairs[][4]);
     static void refineHomography(int nPointPairs, float pointPairs[][4],
                                  matd_t *H);
 }
-$cc proc estimateHomography {float[nPointPairs][4] pointPairs} matd_t* {
+cc::proc estimateHomography {float[nPointPairs][4] pointPairs} matd_t* {
     matd_t *H = estimateHomographyBaseImpl(nPointPairs, pointPairs);
     refineHomography(nPointPairs, pointPairs, H);
     return H;
 }
 
-$cc proc estimateHomographyBaseImpl {float[nPointPairs][4] pointPairs} matd_t* {
+cc::proc estimateHomographyBaseImpl {float[nPointPairs][4] pointPairs} matd_t* {
     float xys[nPointPairs][2];
     float uvs[nPointPairs][2];
     for (int i = 0; i < nPointPairs; i++) {
@@ -203,11 +264,11 @@ $cc proc estimateHomographyBaseImpl {float[nPointPairs][4] pointPairs} matd_t* {
 
 # The refinement code is based on how OpenCV uses LMSolver in findHomography:
 # https://github.com/opencv/opencv/blob/9cdd525bc59b34a3db8f6db905216c5398ca93d6/modules/calib3d/src/fundam.cpp
-$cc cflags -I./vendor/cmpfit
-$cc include <float.h>
-$cc include "mpfit.h"
-$cc include "mpfit.c"
-$cc proc refineHomography {int nPointPairs float[][4] pointPairs
+cc::addcflags -I./vendor/cmpfit
+cc::include <float.h>
+cc::include "mpfit.h"
+cc::include "mpfit.c"
+cc::proc refineHomography {int nPointPairs float[][4] pointPairs
                            matd_t* H} void {
     mp_result result = {0};
     mpfit(refineHomographyComputeError,
@@ -220,7 +281,7 @@ $cc proc refineHomography {int nPointPairs float[][4] pointPairs
           pointPairs,
           &result);
 }
-$cc code {
+cc::addcode {
     int refineHomographyComputeError(int m, int n, double *h,
                                      double *errptr, double **dvec, void *private_data) {
         float (*pointPairs)[4] = (float (*)[4])private_data;
@@ -238,17 +299,17 @@ $cc code {
     }
 }
 
-$cc proc applyHomography {matd_t* H double[2] xy} Jim_Obj* {
+cc::proc applyHomography {matd_t* H double[2] xy} Zicl_Val {
     double out[2];
     homography_project(H, xy[0], xy[1], &out[0], &out[1]);
 
-    Jim_Obj* retObjs[2] = { Jim_NewDoubleObj(interp, out[0]), Jim_NewDoubleObj(interp, out[1]) };
-    return Jim_NewListObj(interp, retObjs, 2);
+    Zicl_Val retObjs[2] = { Zicl_NewDouble(out[0]), Zicl_NewDouble(out[1]) };
+    return Zicl_BoxList(ziclNewList(retObjs, 2));
 }
-$cc proc matdMul {matd_t* a matd_t* b} matd_t* {
+cc::proc matdMul {matd_t* a matd_t* b} matd_t* {
     return matd_multiply(a, b);
 }
-set matLib [$cc compile]
+set matLib [cc::compile]
 Claim the calibration matrix library is $matLib
 
 }

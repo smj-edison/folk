@@ -1,26 +1,26 @@
 When the jpeg library is /jpegLib/ {
     fn jpegLoader {im} {
         if {[string match "*jpg" $im] || [string match "*jpeg" $im]} {
-            return [$jpegLib loadJpeg $im]
+            return [jpegLib::loadJpeg $im]
         }
     }
-    Claim [fn jpegLoader] is an image loader
+    Claim $jpegLoader is an image loader
 }
 
 When the png library is /pngLib/ {
     fn pngLoader {im} {
         if {[string match "*png" $im]} {
-            return [$pngLib loadPng $im]
+            return [pngLib::loadPng $im]
         }
     }
-    Claim [fn pngLoader] is an image loader
+    Claim $pngLoader is an image loader
 }
 
 When the gif library is /gifLib/ {
     fn gifLoader {im} {
         upvar coerceToImage coerceToImage
         if {[string match "*gif" $im]} {
-            set gif [$gifLib loadGif $im]
+            set gif [gifLib::loadGif $im]
             if {$coerceToImage} {
                 return [lindex [dict get $gif frames] 0]
             }
@@ -30,7 +30,7 @@ When the gif library is /gifLib/ {
             return $gif
         }
     }
-    Claim [fn gifLoader] is an image loader
+    Claim $gifLoader is an image loader
 }
 
 
@@ -50,15 +50,17 @@ When the collected results for {/loader/ is an image loader} are /loaders/ {
                 exec curl -s -L -o$im $impath
             }
         }
-        set path [expr {[string index $im 0] eq "/" ?
-                        $im : "$::env(HOME)/folk-images/$im"}]
+        if {[string index $im 0] eq "/"} {
+            set path $im
+        } else {
+            set path "$env::HOME/folk-images/$im"
+        }
         if {![file exists $path]} {
             set path [file join [pwd] $im]
         }
 
         foreach loaderResult $loaders {
-            set loader [dict get $loaderResult loader]
-            set result [{*}$loader $path]
+            set result [loaderResult::loader $path]
             if {$result ne {}} {
                 Hold! -key [list cache $impath] \
                     Claim the image path $impath maps to cached image $result
@@ -67,7 +69,7 @@ When the collected results for {/loader/ is an image loader} are /loaders/ {
         }
         return $im
     }
-    Claim the image loader is [fn loadImage]
+    Claim the image loader is $loadImage
 }
 
 Wish the GPU compiles pipeline "image" {
@@ -114,10 +116,10 @@ When the image library is /imageLib/ &\
         set height [dict get $options height]
     } elseif {[dict exists $options width] && ![dict exists $options height]} {
         set width [dict get $options width]
-        set height $(double([$imageLib Image_height $im]) / [$imageLib Image_width $im] * $width)
+        set height $(double($im::height) / $im::width * $width)
     } elseif {![dict exists $options width] && [dict exists $options height]} {
         set height [dict get $options height]
-        set width $(double([$imageLib Image_width $im]) / [$imageLib Image_height $im] * $height)
+        set width $(double($im::width) / $im::height * $height)
     }
 
     # TODO: implement anchor like in text
@@ -155,11 +157,10 @@ When the image library is /imageLib/ &\
     # HACK: because we match partially
     if {![info exists options]} { return }
 
-    fn loadImage
     try {
         set im [loadImage $impath 0]
     } on error {e opts} {
-        Say $p has error $e with info $opts
+        Say $p has error $e with info [dict get $opts -errorstack]
         return
     }
     if {[string match "*gif" $impath]} {
@@ -168,7 +169,7 @@ When the image library is /imageLib/ &\
     }
 
     set width [/ [dict getdef $geom left [dict get $geom width]] 1.5]
-    set derivedHeight $(double([$imageLib Image_height $im])/[$imageLib Image_width $im] * $width)
+    set derivedHeight $(double($im::height)/$im::width * $width)
     set geomHeight [dict get $geom height]
     if {$derivedHeight > $geomHeight} {
         set width $($geomHeight / $derivedHeight * $width)

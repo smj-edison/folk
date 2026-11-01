@@ -1,48 +1,225 @@
-set cc [C]
-$cc include <stdlib.h>
-$cc include <string.h>
-$cc include <math.h>
+set cc [dict link $C {}]
+cc::include <stdlib.h>
+cc::include <string.h>
+cc::include <math.h>
 
-$cc struct Image {
-    uint32_t width;
-    uint32_t height;
-    int components;
-    uint32_t bytesPerRow;
+cc::addcode {
+    typedef struct Image {
+        // Pointer to the Buffer capability head managing `data` (or NULL before
+        // a raw C-allocated buffer is wrapped into an Image Zicl_Obj).
+        Zicl_CapHead *cap;
+        uint32_t index;
+        uint32_t width;
+        uint32_t height;
+        int components;
+        uint32_t bytesPerRow;
 
-    // Weird: this can be mutated if you want the image to be
-    // reloaded into the GPU.
-    uint64_t uniq;
+        // Weird: this can be mutated if you want the image to be
+        // reloaded into the GPU.
+        uint64_t uniq;
 
-    uint8_t* data;
+        // Computed pointer (`buf->data + index`) for C callers.
+        uint8_t* data;
+    } Image;
+} :extend
+
+cc::objtype Image {
+    extern const Zicl_ObjVTable* Image_VTable;
+
+    static Image* Image_fromObject(const Zicl_Obj* obj) {
+        return *(Image**) Zicl_ObjBodyConst(obj);
+    }
+
+    void Image_freeIntRepProc(Zicl_Obj* objPtr) {
+        Image* im = *(Image**) Zicl_ObjBody(objPtr);
+        if (im->cap) Zicl_CapDropRef(im->cap);
+        free(im);
+    }
+
+    Zicl_Obj* Image_dupIntRepProc(const Zicl_Obj* srcPtr) {
+        Image* allocated = (Image*) malloc(sizeof(Image));
+        if (allocated == NULL) return NULL;
+        void* body = NULL;
+        Zicl_Obj* newObject = Zicl_NewObj(Image_VTable, sizeof(Image*), &body);
+        if (newObject == NULL) { free(allocated); return NULL; }
+        *allocated = *Image_fromObject(srcPtr);
+        if (allocated->cap) Zicl_CapTakeRef(allocated->cap);
+        *(Image**) body = allocated;
+        return newObject;
+    }
+
+    int Image_updateStringProc(Zicl_Obj* objPtr) {
+        Image* im = *(Image**) Zicl_ObjBody(objPtr);
+        Zicl_Val capVal;
+        int rc = Zicl_BoxCap(im->cap, &capVal);
+        if (rc != ZICL_OK) return rc;
+        defer { Zicl_DropRef(capVal); }
+        const char* capStr = ziclString(capVal);
+
+        const char* format = "cap {%s} index {%" PRIu32 "} width {%" PRIu32 "} height {%" PRIu32 "} components {%d} bytesPerRow {%" PRIu32 "} uniq {%" PRIu64 "}";
+        size_t len = (size_t)snprintf(NULL, 0, format,
+            capStr, im->index, im->width, im->height, im->components, im->bytesPerRow, im->uniq);
+        char* bytes = (char*) malloc(len + 1);
+        if (bytes == NULL) return ZICL_OOM;
+        defer { free(bytes); }
+        snprintf(bytes, len + 1, format,
+            capStr, im->index, im->width, im->height, im->components, im->bytesPerRow, im->uniq);
+        return Zicl_SetObjectString(objPtr, bytes, (int)len);
+    }
+
+    int Image_shimmerFrom(Zicl_Interp* interp, Zicl_Shim* shim, Image** out) {
+        void* body = Zicl_AsObjBody(Zicl_Current(shim), Image_VTable);
+        if (body) { *out = *(Image**) body; return ZICL_OK; }
+
+        int rc = ZICL_OK;
+        Zicl_OptVal optCap;
+        ZICL_TRY(Zicl_ShimDictGet(interp, shim, Zicl_InternStr("cap"), &optCap), rc);
+        if (!Zicl_IsSome(optCap)) {
+            Zicl_SetErrorString(interp, "Image missing cap field", -1);
+            return ZICL_ERR;
+        }
+        Zicl_Shim capShim = Zicl_NewShim(Zicl_Unwrap(optCap));
+        defer { Zicl_ShimDiscardChanges(&capShim); }
+
+        Zicl_CapHead* head = NULL;
+        ZICL_TRY(Zicl_ResolveCap(interp, &capShim, Buffer_VTable, &head), rc);
+        defer { if (head) Zicl_CapDropInFlight(head); }
+
+        long index, width, height, components, bytesPerRow, uniq;
+        ZICL_TRY(ziclShimDictGetLong(interp, shim, "index", &index), rc);
+        ZICL_TRY(ziclShimDictGetLong(interp, shim, "width", &width), rc);
+        ZICL_TRY(ziclShimDictGetLong(interp, shim, "height", &height), rc);
+        ZICL_TRY(ziclShimDictGetLong(interp, shim, "components", &components), rc);
+        ZICL_TRY(ziclShimDictGetLong(interp, shim, "bytesPerRow", &bytesPerRow), rc);
+        ZICL_TRY(ziclShimDictGetLong(interp, shim, "uniq", &uniq), rc);
+
+        if (index < 0 || width < 0 || height < 0 || components < 0 || bytesPerRow < 0) {
+            Zicl_SetErrorString(interp, "Image fields must be non-negative", -1);
+            return ZICL_ERR;
+        }
+        if (height > 0 && (size_t)width * (size_t)components > (size_t)bytesPerRow) {
+            Zicl_SetErrorString(interp, "Image width * components exceeds bytesPerRow", -1);
+            return ZICL_ERR;
+        }
+        Buffer* buf = Zicl_ContainerOf(head, Buffer, head);
+        size_t requiredEnd = (size_t)index;
+        if (height > 0 && width > 0 && components > 0) {
+            requiredEnd += (size_t)(height - 1) * (size_t)bytesPerRow + (size_t)width * (size_t)components;
+        }
+        if (requiredEnd > buf->size) {
+            Zicl_SetErrorString(interp, "Image slice exceeds buffer size", -1);
+            return ZICL_ERR;
+        }
+
+        Image* allocated = (Image*) malloc(sizeof(Image));
+        if (allocated == NULL) return ZICL_OOM;
+        *allocated = (Image) {
+            .cap = Zicl_CapTakeRef(head),
+            .index = (uint32_t)index,
+            .width = (uint32_t)width,
+            .height = (uint32_t)height,
+            .components = (int)components,
+            .bytesPerRow = (uint32_t)bytesPerRow,
+            .uniq = (uint64_t)uniq,
+            .data = buf->data + (uint32_t)index,
+        };
+
+        void* newBody = Zicl_PrepareToShimmer(shim, Image_VTable);
+        if (newBody == NULL) {
+            Zicl_CapDropRef(allocated->cap);
+            free(allocated);
+            return ZICL_OOM;
+        }
+        *(Image**) newBody = allocated;
+        *out = allocated;
+        return ZICL_OK;
+    }
+
+    static const Zicl_ObjVTable Image_vtable = {
+        .is_c_vtable = true,
+        .name = "Image",
+        .duplicate = Image_dupIntRepProc,
+        .free_internal_rep = Image_freeIntRepProc,
+        .update_string = Image_updateStringProc,
+        .make_crossthread = Zicl_NoopMakeCrossthread,
+        .enumerate_struct = NULL,
+    };
+    const Zicl_ObjVTable* Image_VTable = &Image_vtable;
+
+    static inline Image Image_unwrap(Zicl_Interp* interp, Zicl_Shim* shim) {
+        Image* imPtr = NULL;
+        __ENSURE_OK(Image_shimmerFrom(interp, shim, &imPtr));
+        __ENSURE_OK(Zicl_CapMarkInFlight(interp, imPtr->cap));
+        __capCleanupDefer(imPtr->cap);
+        Buffer* buf = Zicl_ContainerOf(imPtr->cap, Buffer, head);
+        Image im = *imPtr;
+        im.data = buf->data + im.index;
+        return im;
+    }
+
+    static inline Zicl_Val Image_wrap(Image im) {
+        if (im.cap == NULL) {
+            Buffer* buf = bufferNewFromPtr(im.data, (size_t)im.height * im.bytesPerRow);
+            im.cap = &buf->head;
+            im.index = 0;
+        } else {
+            Zicl_CapTakeRef(im.cap);
+        }
+        Image* allocated = (Image*) malloc(sizeof(Image));
+        *allocated = im;
+        void* body = NULL;
+        Zicl_Obj* obj = Zicl_NewObj(Image_VTable, sizeof(Image*), &body);
+        if (obj == NULL) folkZiclAssert(ZICL_OOM);
+        *(Image**) body = allocated;
+        return Zicl_BoxObject(obj);
+    }
+}
+cc::argtype Image {
+    Image $argname = Image_unwrap(interp, $shim);
+}
+cc::rtype Image {
+    $robj = Image_wrap($rvalue);
+}
+
+cc::proc data {Image im int idx} int {
+    FOLK_ENSURE(idx >= 0 && (size_t)idx < (size_t)im.height * im.bytesPerRow);
+    return im.data[idx];
 }
 
 # Note that this returns an image whose lifetime is tied to the original image.
-$cc proc slice {Image im double x double y double subwidth double subheight} Image {
-    uint8_t *subdata = im.data + (int)y*im.bytesPerRow + (int)x*im.components;
+cc::proc slice {Image im double x double y double subwidth double subheight} Image {
+    FOLK_ENSURE(x >= 0 && y >= 0 && subwidth >= 0 && subheight >= 0);
+    FOLK_ENSURE((uint32_t)x + (uint32_t)subwidth <= im.width &&
+                (uint32_t)y + (uint32_t)subheight <= im.height);
+    uint32_t suboffset = (uint32_t)y * im.bytesPerRow + (uint32_t)x * (uint32_t)im.components;
     return (Image) {
+        .cap = im.cap,
+        .index = im.index + suboffset,
         .width = (uint32_t)subwidth,
         .height = (uint32_t)subheight,
         .components = im.components,
         .bytesPerRow = im.bytesPerRow,
-        .data = subdata,
+        .data = im.data + suboffset,
         .uniq = im.uniq
     };
 }
 
-$cc proc get {Image im double x double y} Jim_Obj* {
+cc::proc get {Image im double x double y} Zicl_Val {
     int i = y * im.bytesPerRow + x * im.components;
     FOLK_ENSURE(x >= 0 && y >= 0 &&
                 x < im.width && y < im.height);
     uint8_t r = im.data[i];
     uint8_t g = im.data[i + 1];
     uint8_t b = im.data[i + 2];
-    return Jim_ObjPrintf("%g %g %g",
+    Zicl_Val ret;
+    folkZiclAssert(Zicl_NewStringFormatted(&ret, "%g %g %g",
                          (double)r / 255.0,
                          (double)g / 255.0,
-                         (double)b / 255.0);
+                         (double)b / 255.0));
+    return ret;
 }
 
-$cc proc imageNew {int width int height int components int uniq} Image {
+cc::proc imageNew {int width int height int components int uniq} Image {
     uint8_t* data = malloc(width*components*height);
     return (Image) {
         .width = width,
@@ -53,11 +230,150 @@ $cc proc imageNew {int width int height int components int uniq} Image {
         .uniq = uniq
     };
 }
-$cc proc imageFree {Image image} void {
-    free(image.data);
+cc::proc copyCrop {Image im int x int y int width int height} Image {
+    FOLK_ENSURE(x >= 0 && y >= 0 && width > 0 && height > 0);
+    FOLK_ENSURE(x + width <= im.width && y + height <= im.height);
+    Image result = imageNew(width, height, im.components, im.uniq);
+    size_t rowBytes = (size_t)width * im.components;
+    for (int row = 0; row < height; row++) {
+        memcpy(result.data + row * result.bytesPerRow,
+               im.data + (y + row) * im.bytesPerRow + x * im.components,
+               rowBytes);
+    }
+    return result;
+}
+cc::proc paddedCrop {Image im double paddingFraction int minimumPadding
+                     int backgroundR int backgroundG int backgroundB} Image {
+    FOLK_ENSURE(im.components >= 3);
+    FOLK_ENSURE(paddingFraction >= 0.0 && minimumPadding >= 0);
+
+    int minX = im.width;
+    int minY = im.height;
+    int maxX = -1;
+    int maxY = -1;
+    for (int y = 0; y < im.height; y++) {
+        for (int x = 0; x < im.width; x++) {
+            uint8_t *pixel = im.data + y * im.bytesPerRow + x * im.components;
+            if (pixel[0] == backgroundR &&
+                pixel[1] == backgroundG &&
+                pixel[2] == backgroundB) {
+                continue;
+            }
+            if (x < minX) minX = x;
+            if (x > maxX) maxX = x;
+            if (y < minY) minY = y;
+            if (y > maxY) maxY = y;
+        }
+    }
+
+    int cropX = 0;
+    int cropY = 0;
+    int cropWidth = im.width;
+    int cropHeight = im.height;
+    if (maxX >= 0) {
+        int boxWidth = maxX - minX + 1;
+        int boxHeight = maxY - minY + 1;
+        int longestSide = boxWidth > boxHeight ? boxWidth : boxHeight;
+        int padding = (int)round(longestSide * paddingFraction);
+        if (padding < minimumPadding) padding = minimumPadding;
+
+        int size = longestSide + 2 * padding;
+        int maxSquareSize = im.width < im.height ? im.width : im.height;
+        if (size > maxSquareSize) size = maxSquareSize;
+
+        double centerX = (minX + maxX + 1) / 2.0;
+        double centerY = (minY + maxY + 1) / 2.0;
+        cropX = (int)round(centerX - size / 2.0);
+        cropY = (int)round(centerY - size / 2.0);
+        if (cropX < 0) cropX = 0;
+        if (cropY < 0) cropY = 0;
+        if (cropX > (int)im.width - size) cropX = im.width - size;
+        if (cropY > (int)im.height - size) cropY = im.height - size;
+        cropWidth = size;
+        cropHeight = size;
+    }
+
+    Image result = imageNew(cropWidth, cropHeight, im.components, im.uniq);
+    size_t rowBytes = (size_t)cropWidth * im.components;
+    for (int row = 0; row < cropHeight; row++) {
+        memcpy(result.data + row * result.bytesPerRow,
+               im.data + (cropY + row) * im.bytesPerRow +
+                   cropX * im.components,
+               rowBytes);
+    }
+    return result;
+}
+cc::proc paddedCropAt {Image im double centerXDouble double centerYDouble
+                       double paddingFraction int minimumPadding
+                       int backgroundR int backgroundG int backgroundB} Image {
+    FOLK_ENSURE(im.components >= 3);
+    FOLK_ENSURE(paddingFraction >= 0.0 && minimumPadding >= 0);
+
+    int minX = im.width;
+    int minY = im.height;
+    int maxX = -1;
+    int maxY = -1;
+    for (int y = 0; y < im.height; y++) {
+        for (int x = 0; x < im.width; x++) {
+            uint8_t *pixel = im.data + y * im.bytesPerRow + x * im.components;
+            if (pixel[0] == backgroundR &&
+                pixel[1] == backgroundG &&
+                pixel[2] == backgroundB) continue;
+            if (x < minX) minX = x;
+            if (x > maxX) maxX = x;
+            if (y < minY) minY = y;
+            if (y > maxY) maxY = y;
+        }
+    }
+
+    int centerX = (int)round(centerXDouble);
+    int centerY = (int)round(centerYDouble);
+    int halfSize = minimumPadding;
+    if (maxX >= 0) {
+        int left = centerX - minX;
+        int right = maxX - centerX;
+        int top = centerY - minY;
+        int bottom = maxY - centerY;
+        halfSize = left;
+        if (right > halfSize) halfSize = right;
+        if (top > halfSize) halfSize = top;
+        if (bottom > halfSize) halfSize = bottom;
+        int padding = (int)round((2 * halfSize + 1) * paddingFraction);
+        if (padding < minimumPadding) padding = minimumPadding;
+        halfSize += padding;
+    }
+
+    int size = 2 * halfSize + 1;
+    Image result = imageNew(size, size, im.components, im.uniq);
+    for (int i = 0; i < size * size; i++) {
+        for (int component = 0; component < im.components; component++) {
+            result.data[i * im.components + component] =
+                component < 3 ? (component == 0 ? backgroundR :
+                                 component == 1 ? backgroundG : backgroundB)
+                              : 255;
+        }
+    }
+
+    int sourceX = centerX - halfSize;
+    int sourceY = centerY - halfSize;
+    for (int y = 0; y < size; y++) {
+        int yIn = sourceY + y;
+        if (yIn < 0 || yIn >= im.height) continue;
+        for (int x = 0; x < size; x++) {
+            int xIn = sourceX + x;
+            if (xIn < 0 || xIn >= im.width) continue;
+            memcpy(result.data + y * result.bytesPerRow + x * im.components,
+                   im.data + yIn * im.bytesPerRow + xIn * im.components,
+                   im.components);
+        }
+    }
+    return result;
+}
+cc::proc imageFree {Image im} void {
+    Zicl_CapClose(im.cap);
 }
 
-$cc code {
+cc::addcode {
     static int solve8x8(double A[8][8], double b[8], double x[8])
     {
         for (int col = 0; col < 8; col++) {
@@ -138,7 +454,7 @@ $cc code {
 
 # Note that this returns a fresh (copied) image. imVertices are
 # coordinates in im, clockwise from top-left.
-$cc proc warpQuad {Image im double[4][2] imVertices
+cc::proc warpQuad {Image im double[4][2] imVertices
                    int outWidth int outHeight} Image {
     if (outWidth <= 0 || outHeight <= 0 ||
         outWidth > (int)im.width * 4 || outHeight > (int)im.height * 4) {
@@ -169,21 +485,31 @@ $cc proc warpQuad {Image im double[4][2] imVertices
     }
 
     for (int y = 0; y < outHeight; y++) {
-        uint8_t *dstRow = out.data + y * out.bytesPerRow;
+        uint8_t *dstPixel = out.data + y * out.bytesPerRow;
 
-        for (int x = 0; x < outWidth; x++) {
-            uint8_t *dstPixel = dstRow + x * out.components;
+        // A homography's numerator and denominator are linear in x. Step
+        // them across the scanline instead of evaluating six multiplies
+        // for every output pixel.
+        double numeratorX = H[1] * y + H[2];
+        double numeratorY = H[4] * y + H[5];
+        double denominator = H[7] * y + H[8];
 
-            double denom = H[6] * x + H[7] * y + H[8];
-            if (fabs(denom) < 1e-12) {
+        for (int x = 0; x < outWidth; x++, dstPixel += out.components) {
+            if (fabs(denominator) < 1e-12) {
                 for (int c = 0; c < im.components; c++) {
                     dstPixel[c] = 0;
                 }
+                numeratorX += H[0];
+                numeratorY += H[3];
+                denominator += H[6];
                 continue;
             }
 
-            double srcX = (H[0] * x + H[1] * y + H[2]) / denom;
-            double srcY = (H[3] * x + H[4] * y + H[5]) / denom;
+            double srcX = numeratorX / denominator;
+            double srcY = numeratorY / denominator;
+            numeratorX += H[0];
+            numeratorY += H[3];
+            denominator += H[6];
 
             int ix = (int)floor(srcX);
             int iy = (int)floor(srcY);
@@ -196,10 +522,22 @@ $cc proc warpQuad {Image im double[4][2] imVertices
                 uint8_t *p10 = p00 + im.components;
                 uint8_t *p01 = p00 + im.bytesPerRow;
                 uint8_t *p11 = p01 + im.components;
-                for (int c = 0; c < im.components; c++) {
-                    int top = p00[c] + ((fx * (p10[c] - p00[c])) >> 8);
-                    int bot = p01[c] + ((fx * (p11[c] - p01[c])) >> 8);
-                    dstPixel[c] = (uint8_t)(top + ((fy * (bot - top)) >> 8));
+
+                // Camera frames are RGB. Keeping this common case explicit
+                // lets the compiler unroll it despite components being a
+                // runtime field; retain the generic path for other images.
+                if (im.components == 3) {
+                    for (int c = 0; c < 3; c++) {
+                        int top = p00[c] + ((fx * (p10[c] - p00[c])) >> 8);
+                        int bot = p01[c] + ((fx * (p11[c] - p01[c])) >> 8);
+                        dstPixel[c] = (uint8_t)(top + ((fy * (bot - top)) >> 8));
+                    }
+                } else {
+                    for (int c = 0; c < im.components; c++) {
+                        int top = p00[c] + ((fx * (p10[c] - p00[c])) >> 8);
+                        int bot = p01[c] + ((fx * (p11[c] - p01[c])) >> 8);
+                        dstPixel[c] = (uint8_t)(top + ((fy * (bot - top)) >> 8));
+                    }
                 }
             } else if (ix >= 0 && ix < (int)im.width && iy >= 0 && iy < (int)im.height) {
                 uint8_t *srcPixel = im.data + iy * im.bytesPerRow + ix * im.components;
@@ -217,14 +555,14 @@ $cc proc warpQuad {Image im double[4][2] imVertices
     return out;
 }
 
-set imageLib [$cc compile]
+set imageLib [cc::compile]
 Claim the image library is $imageLib
 
 fn defineImageArgtype {uvx} {
-    set cc [C]
-    $cc extend $imageLib
-    $cc include <unistd.h>
-    $cc proc sockSendImage {int fd Image im} void {
+    set cc [dict link $C {}]
+    cc::extend $imageLib
+    cc::include <unistd.h>
+    cc::proc sockSendImage {int fd Image im} void {
         // Image must be contiguous for now (TODO: copy if not)
         FOLK_ENSURE(im.bytesPerRow == im.width * im.components);
 
@@ -246,9 +584,9 @@ fn defineImageArgtype {uvx} {
         len = (uint32_t)dataLen;
         write(fd, &len, 4); write(fd, im.data, dataLen);
     }
-    set lib [$cc compile]
+    set lib [cc::compile]
 
-    $uvx argtype Image "$lib sockSendImage \$socket \$arg" {
+    uvx::argtype Image [fn {socket arg} { lib::sockSendImage $socket $arg }] {
         import struct
         from PIL import Image
 
@@ -272,4 +610,4 @@ fn defineImageArgtype {uvx} {
         return img
     }
 }
-Claim the image uvx argtype definer is [fn defineImageArgtype]
+Claim the image uvx argtype definer is $defineImageArgtype

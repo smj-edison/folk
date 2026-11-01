@@ -113,10 +113,7 @@ Wish the web server handles route "/new" with nav "<button>New program</button>"
     Wish ${program} has a canvas
   `);
 
-  function formatErrorInfo(errorInfoDict) {
-    errorInfoDict = loadDict(errorInfoDict);
-    const stacktrace = errorInfoDict['-errorinfo'];
-
+  function formatErrorInfo(stacktrace) {
     // Parse the stacktrace list (simplified Tcl list parser)
     // Format: [proc file line cmd proc file line cmd ...]
     const frames = [];
@@ -128,7 +125,7 @@ Wish the web server handles route "/new" with nav "<button>New program</button>"
       frames.push({ proc, file, line, cmd });
     }
 
-    if (frames.length === 0) return errorInfoDict;
+    if (frames.length === 0) return stacktrace;
 
     // Format like Jim's errorInfo: "file:line: Error: msg\nstackdump"
     const firstFrame = frames[0];
@@ -164,11 +161,7 @@ Wish the web server handles route "/new" with nav "<button>New program</button>"
       Claim ${program} has resolved geometry {width ${w / 2000} height ${h / 2000}}
    `);
     ws.hold('quad', tcl`
-      package require linalg
-      namespace import ::math::linearalgebra::add
-      namespace import ::math::linearalgebra::sub
-      namespace import ::math::linearalgebra::matmul
-      namespace import ::math::linearalgebra::scale
+      dict assign [import lib/linalg.tcl] add sub matmul scale
 
       Require! the quad library is /quadLib/
       Require! display /disp/ has width /displayWidth/ height /displayHeight/
@@ -235,7 +228,7 @@ Wish the web server handles route "/new" with nav "<button>New program</button>"
       ]
 
       Claim ${program} has quad \
-          [$quadLib create "display $disp" $rotated_vertices]
+          [quadLib::create "display $disp" $rotated_vertices]
   `);
   }
   function handleSave() {
@@ -244,8 +237,7 @@ Wish the web server handles route "/new" with nav "<button>New program</button>"
     // preserved in the code and printout (otherwise, braced-string-parsing
     // would elide them: https://www.tcl.tk/man/tcl8.7/TclCmd/Tcl.html#M10)
     ws.hold('code', tcl`
-      package require base64
-      Claim ${program} has program code [binary decode base64 ${btoa(code)}]
+      Claim ${program} has program code [codec decode base64 ${btoa(code)}]
     `);
   }
   function handlePrint() {

@@ -2,6 +2,7 @@
 #define DB_H
 
 #include <pthread.h>
+#include <libzicl.h>
 
 #include "trie.h"
 
@@ -10,6 +11,7 @@ typedef struct Match Match;
 typedef struct Db Db;
 
 typedef struct AtomicallyVersion AtomicallyVersion;
+typedef struct Atomically Atomically;
 
 typedef struct Destructor Destructor;
 Destructor* destructorNew(void (*fn)(void*), void* arg);
@@ -44,6 +46,7 @@ typedef union MatchRef {
 // its gen and clause remain immutable.
 Statement* statementAcquire(Db* db, StatementRef ref);
 void statementRelease(Db* db, Statement* stmt);
+void matchInheritStatementDestructors(Match* match, Statement* stmt);
 
 Statement* statementUnsafeGet(Db* db, StatementRef ref);
 
@@ -52,18 +55,22 @@ bool statementCheck(Db* db, StatementRef ref);
 StatementRef statementRef(Db* db, Statement* stmt);
 
 // Getters:
-Clause* statementClause(Statement* stmt);
-AtomicallyVersion* statementAtomicallyVersion(Statement* stmt);
+Zicl_List* statementClause(Statement* stmt);
+// Borrowed immutable arrays, valid while the statement/match is acquired.
+AtomicallyVersion* const* statementAtomicallyVersions(Statement* stmt, int* count);
+bool statementAtomicallyHasConverged(Statement* stmt);
+
 char* statementSourceFileName(Statement* stmt);
 int statementSourceLineNumber(Statement* stmt);
+Zicl_Dict* statementOtherAttributes(Statement* stmt);
 
 int statementIncompleteChildMatchesCount(Db* db, Statement* stmt);
 
 void statementAddDestructor(Statement* stmt, Destructor* d);
 void statementInheritDestructors(Statement* stmt, Statement* fromStmt);
 
-void statementIncrParentCount(Statement* stmt);
 void statementDecrParentCountAndMaybeRemoveSelf(Db* db, Statement* stmt);
+void statementKeepExpired(Db* db, Statement* stmt, uint64_t keepGeneration);
 void statementRemoveSelf(Db* db, Statement* stmt, bool doDeindex);
 
 // Match
@@ -78,8 +85,7 @@ void matchRelease(Db* db, Match* m);
 
 bool matchCheck(Db* db, MatchRef ref);
 
-AtomicallyVersion* matchAtomicallyVersion(Match* m);
-void matchSetAtomicallyVersion(Match* m, AtomicallyVersion* a);
+AtomicallyVersion* const* matchAtomicallyVersions(Match* m, int* count);
 
 void matchAddDestructor(Match* m, Destructor* d);
 
@@ -90,8 +96,6 @@ MatchRef matchRef(Db* db, Match* m);
 
 // Db
 // --
-
-typedef struct Clause Clause;
 
 Db* dbNew();
 const Trie* dbGetClauseToStatementRef(Db* db);
@@ -106,17 +110,11 @@ typedef struct ResultSet {
 // invalid by the time dbQuery returns.
 //
 // Caller must free the returned ResultSet*.
-ResultSet* dbQuery(Db* db, Clause* pattern);
+ResultSet* dbQuery(Db* db, Zicl_List* pattern);
 
-// Creates and returns a new version (convergence-tracking subgraph)
-// on `key`.
-//
-// Copies `key` if needed (so the caller may safely free it
-// afterward). The returned pointer can be passed to Match and
-// Statement insertion to attach them to that version. The
-// AtomicallyVersion is guaranteed not to ever be freed.
-AtomicallyVersion* dbFreshAtomicallyVersionOnKey(Db* db, const char* key,
-                                                 MatchRef rootMatchRef);
+// Resolve the key before taking parent locks. Copies key if needed; the
+// returned arena is owned by the DB and is never freed.
+Atomically* dbGetOrCreateAtomically(Db* db, const char* key, int64_t timeout);
 
 bool dbAtomicallyVersionHasConverged(AtomicallyVersion* atomicallyVersion);
 int dbAtomicallyVersionInflightCount(AtomicallyVersion* atomicallyVersion);
@@ -128,8 +126,20 @@ void dbInflightDecr(Db* db, Statement* stmt);
 void dbAtomicallyVersionInflightIncr(AtomicallyVersion* atomicallyVersion);
 void dbAtomicallyVersionInflightDecr(Db* db, AtomicallyVersion* atomicallyVersion);
 
-// Note: once you call this, ownership of `clause` transfers to the
-// DB, which then becomes responsible for freeing it later.
+typedef struct StatementContext {
+    long keepMs;
+    // Referenced; copied by statementNew.
+    AtomicallyVersion* const* atomicallyVersions;
+    int atomicallyVersionsCount;
+    // Referenced; copied into stmt->sourceFileName by statementNew.
+    const char* sourceFileName;
+    int sourceLineNumber;
+    // Owned; ownership transfers to the DB on insertion.
+    Zicl_Dict* otherAttributes;
+} StatementContext;
+
+// Note: once you call this, ownership of `clause` and `ctx.otherAttributes`
+// transfers to the DB, which then becomes responsible for freeing them later.
 //
 // Pass a null MatchRef for `parent` if this is an assertion.
 //
@@ -137,9 +147,9 @@ void dbAtomicallyVersionInflightDecr(Db* db, AtomicallyVersion* atomicallyVersio
 // the caller. (This is mainly so that the caller can insert
 // destructors at will before doing the release.) Returns NULL if no
 // new statement was created.
-Statement* dbInsertOrReuseStatement(Db* db, Clause* clause,
-                                    long keepMs, AtomicallyVersion* atomicallyVersion,
-                                    const char* sourceFileName, int sourceLineNumber,
+// ctx.atomicallyVersions is a set (no duplicate pointers); creation copies it.
+Statement* dbInsertOrReuseStatement(Db* db, Zicl_List* clause,
+                                    StatementContext ctx,
                                     MatchRef parent,
                                     StatementRef* outReusedStatementRef);
 
@@ -151,11 +161,16 @@ Statement* dbInsertOrReuseStatement(Db* db, Clause* clause,
 // 
 // The new Match is returned acquired and needs to be released by the
 // caller.
+//
+// On successful attachment:
+// Inherit the union of the parents' versions, or replace them with a fresh
+// pinned version if freshAtomically is non-NULL. The caller owns one inflight
+// operation in every version and must decrement each when the match finishes.
 Match* dbInsertMatch(Db* db, int nParents, StatementRef parents[],
-                     AtomicallyVersion* atomicallyVersion,
+                     Atomically* freshAtomically,
                      int workerThreadIndex);
 
-void dbRetractStatements(Db* db, Clause* pattern);
+void dbRetractStatements(Db* db, Zicl_List* pattern);
 
 // If `version` is negative, then this statement will always stomp the
 // previous version.
@@ -167,9 +182,8 @@ void dbRetractStatements(Db* db, Clause* pattern);
 // the caller. (This is mainly so that the caller can insert
 // destructors at will before doing the release.) Returns NULL if no
 // new statement was created.
-Statement* dbHoldStatement(Db* db,
-                           const char* key, double version,
-                           Clause* clause, long keepMs,
+Statement* dbHoldStatement(Db* db, const char* key, double version,
+                           Zicl_List* clause, long keepMs,
                            const char* sourceFileName, int sourceLineNumber,
                            StatementRef* outOldStatement);
 

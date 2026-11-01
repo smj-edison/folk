@@ -1,32 +1,20 @@
-# sha1 for stable, content-addressed pipeline names.
-set cc [C]
-$cc include <string.h>
-$cc include <openssl/sha.h>
-$cc proc sha1 {char* d} Jim_Obj* {
-    unsigned char md[20];
-    SHA1((unsigned char *)d, strlen(d), md);
-    return Jim_NewStringObj(interp, (char *)md, 20);
-}
-$cc endcflags -lssl -lcrypto
-set sha1Lib [$cc compile]
-
-When the GPU Vulkan handle type definer is /defineVulkanHandleType/ &\
+When the GPU Vulkan C prototype is /Vulkan/ &\
      the GPU pipeline library is /pipelineLib/ {
 
 # Custom push-constants encoder for ShaderToy uniforms.
 # Layout (std430):
-#   offset  0  vec3  iResolution    (12 bytes — no trailing pad,
+#   offset  0  vec3  iResolution    (12 bytes -- no trailing pad,
 #                                    since the next member is a scalar)
 #   offset 12 float iTime          (4 bytes)
 #
 # Wish arguments: [list $resolution $iTime]
-set cc [C]
-$cc include <string.h>
-$cc include <stdint.h>
-$cc code {
+set cc [dict link $C {}]
+cc::include <string.h>
+cc::include <stdint.h>
+cc::addcode {
     // HACK: copied from pipelines.folk
     typedef struct PushConstantsEncoder {
-        int (*encode)(Jim_Interp* interp, Jim_Obj* obj, uint8_t out[128]);
+        int (*encode)(Zicl_Interp* interp, Zicl_Val obj, uint8_t out[128]);
     } PushConstantsEncoder;
 
     typedef struct Args {
@@ -34,43 +22,65 @@ $cc code {
         float iTime;
     } Args;
 
-    static int encodeToy(Jim_Interp* interp, Jim_Obj* obj, uint8_t out[128]) {
+    // Reads item `index` of `list` as a double. Returns 0 on success.
+    static int toyGetDouble(Zicl_Interp* interp, const Zicl_List* list, int index, double* out) {
+        if (index >= Zicl_ListLength(list)) return -1;
+        Zicl_Shim el = Zicl_NewShim(Zicl_ListItems(list)[index]);
+        int rc = Zicl_GetDouble(interp, &el, out);
+        Zicl_ShimDiscardChanges(&el);
+        return rc == ZICL_OK ? 0 : -1;
+    }
+
+    static int encodeToy(Zicl_Interp* interp, Zicl_Val obj, uint8_t out[128]) {
         Args args = {0};
+        int ret = -1;
+
+        Zicl_Shim objShim = Zicl_NewShim(obj);
+        const Zicl_List* items;
+        if (Zicl_ShimmerToList(interp, &objShim, &items) != ZICL_OK) goto done;
+        if (Zicl_ListLength(items) < 2) goto done;
 
         // iResolution: caller passes {width height}; we synthesize z=1.
-        Jim_Obj* resObj = Jim_ListGetIndex(interp, obj, 0);
-        if (Jim_ListLength(interp, resObj) != 2) return -1;
-        double w, h;
-        if (Jim_GetDouble(interp, Jim_ListGetIndex(interp, resObj, 0), &w) != JIM_OK) return -1;
-        if (Jim_GetDouble(interp, Jim_ListGetIndex(interp, resObj, 1), &h) != JIM_OK) return -1;
-        args.iResolution[0] = (float)w;
-        args.iResolution[1] = (float)h;
-        args.iResolution[2] = 1.0f;
+        Zicl_Shim resShim = Zicl_NewShim(Zicl_ListItems(items)[0]);
+        const Zicl_List* res;
+        if (Zicl_ShimmerToList(interp, &resShim, &res) == ZICL_OK &&
+            Zicl_ListLength(res) == 2) {
+            double w, h, t;
+            if (toyGetDouble(interp, res, 0, &w) == 0 &&
+                toyGetDouble(interp, res, 1, &h) == 0 &&
+                toyGetDouble(interp, items, 1, &t) == 0) {
+                args.iResolution[0] = (float)w;
+                args.iResolution[1] = (float)h;
+                args.iResolution[2] = 1.0f;
+                // iTime: seconds since shader load.
+                args.iTime = (float)t;
 
-        // iTime: seconds since shader load.
-        double t;
-        if (Jim_GetDouble(interp, Jim_ListGetIndex(interp, obj, 1), &t) != JIM_OK) return -1;
-        args.iTime = (float)t;
+                memcpy(out, &args, sizeof(args));
+                ret = sizeof(args);
+            }
+        }
+        Zicl_ShimDiscardChanges(&resShim);
 
-        memcpy(out, &args, sizeof(args));
-        return sizeof(args);
+    done:
+        Zicl_ShimDiscardChanges(&objShim);
+        return ret;
     }
 }
-$cc proc makeToyEncoder {} PushConstantsEncoder* {
+cc::proc makeToyEncoder {} PushConstantsEncoder* {
     PushConstantsEncoder* e = malloc(sizeof(PushConstantsEncoder));
     e->encode = encodeToy;
     return e;
 }
-$cc proc getToyArgsSize {} int { return sizeof(Args); }
-set toyEncoderLib [$cc compile]
+cc::proc getToyArgsSize {} int { return sizeof(Args); }
+set toyEncoderLib [cc::compile]
 
-set toyEncoder [$toyEncoderLib makeToyEncoder]
-set toyArgsSize [$toyEncoderLib getToyArgsSize]
+set toyEncoder [toyEncoderLib::makeToyEncoder]
+set toyArgsSize [toyEncoderLib::getToyArgsSize]
 
 # Run glslc as a subprocess to turn GLSL into SPIR-V words.
 fn toyGlslc {stage glsl} {
     set glslfile [file tempfile /tmp/toyshaderXXXXXX].glsl
-    set glslfd [open $glslfile w]; puts $glslfd $glsl; close $glslfd
+    set glslfd [file open $glslfile w]; stream write $glslfd "$glsl\n"; close $glslfd
     split [string map {\n ""} [exec glslc -fshader-stage=$stage -mfmt=num -o - $glslfile]] ","
 }
 
@@ -82,7 +92,7 @@ set toyPushConstantsBlock {
 }
 
 When /wisher/ wishes /p/ draws toy shader /shaderCode/ {
-    binary scan [$sha1Lib sha1 $shaderCode] H* sha1
+    set sha1 [codec encode hex [codec hash sha-1 $shaderCode]]
 
     set vertGlsl [csubst {
         #version 450
@@ -132,14 +142,14 @@ When /wisher/ wishes /p/ draws toy shader /shaderCode/ {
     }]
 
     try {
-        set vertShaderModule [$pipelineLib createShaderModule [toyGlslc vert $vertGlsl]]
-        set fragShaderModule [$pipelineLib createShaderModule [toyGlslc frag $fragGlsl]]
-    } on error e {
-        puts stderr "Error compiling toy shader: [errorInfo $e]"
-        Claim $wisher has error $e with info [errorInfo $e]
+        set vertShaderModule [pipelineLib::createShaderModule [toyGlslc vert $vertGlsl]]
+        set fragShaderModule [pipelineLib::createShaderModule [toyGlslc frag $fragGlsl]]
+    } on error {e opts} {
+        puts stderr "Error compiling toy shader: [errorInfoFor $e $opts]"
+        Claim $wisher has error $e with info [dict get $opts -errorstack]
     }
 
-    set pipeline [$pipelineLib createPipeline \
+    set pipeline [pipelineLib::createPipeline \
                       $vertShaderModule $fragShaderModule \
                       $toyEncoder $toyArgsSize]
 

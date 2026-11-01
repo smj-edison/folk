@@ -1,14 +1,11 @@
 # Manage terminal UI for Folk.
-
-$::realStdout puts "Folk Computer (pid [pid])."
-set host $([string match "*.local" $::thisNode] ? $::thisNode : "$::thisNode.local")
-$::realStdout puts "Web interface at: http://$host:4273/"
-$::realStdout puts ""
-$::realStdout flush
+stream write $realStdout "Folk Computer (pid [pid]).\n"
+if {[string match "*.local" $thisNode]} { set host $thisNode } else { set host "$thisNode.local" }
+stream write $realStdout "Web interface at: http://$host:4273/\n\n"
 
 # Don't run the watcher process if we're not literally at a terminal
 # (if we're running on systemd, for instance.)
-if {$::env(TERM) eq "dumb"} {
+if {$env::TERM eq "dumb"} {
     return
 }
 
@@ -28,22 +25,31 @@ set startMs [clock milliseconds]
 while true {
     set elapsedMs [expr {[clock milliseconds] - $startMs}]
     set settled [expr {$elapsedMs > 60000}]
-    after [expr {$settled ? 500 : 40}]
+    sleep [expr {$settled ? 0.5 : 0.04}]
 
-    set results [lsort -command {apply {{a b} {
+    set results [lsort -command [fn {a b} {
         string compare [dict get $a program] [dict get $b program]
-    }}} [Query! /program/ has program code /programCode/]]
+    }] [Query! /program/ has program code /programCode/]]
+
+    set runnersByProgram [dict create]
+    foreach runner [Query! when /runnerClosure/] {
+        set closureDict [lrange [dict get $runner runnerClosure] 1 end]
+        if {[dict exists $closureDict scope]} {
+            set scope [deref [dict get $closureDict scope]]
+            if {[dict exists $scope this]} {
+                dict set runnersByProgram [dict get $scope this] [dict get $runner __ref]
+            }
+        }
+    }
 
     # Build groups: dict mapping dirname -> list of {status basename}
     set groups [dict create]
     foreach result $results {
         set program [dict get $result program]
-        set programCode [dict get $result programCode]
 
-        set runners [Query! when $programCode with environment [list [list this $program]]]
-        if {[llength $runners] != 1} { continue }
-        set runner [lindex $runners 0]
-        set incompleteCount [__statementIncompleteChildMatchesCount [dict get $runner __ref]]
+        if {![dict exists $runnersByProgram $program]} { continue }
+        set runnerRef [dict get $runnersByProgram $program]
+        set incompleteCount [__statementIncompleteChildMatchesCount $runnerRef]
 
         set errors [Query! $program has error /err/ with info /info/]
 
@@ -90,22 +96,22 @@ while true {
         lappend lines $line
     }
     if {[llength $lines] > $maxLines} {
-        set lines [lrange $lines 0 $maxLines-1]
+        set lines [lrange $lines 0 $($maxLines-1)]
     }
 
     if {$prevLineCount > 0} {
-        $::realStdout puts -nonewline "\033\[${prevLineCount}A\r"
+        stream write $realStdout "\033\[${prevLineCount}A\r"
     }
-    $::realStdout puts -nonewline "\033\[?7l"
+    stream write $realStdout "\033\[?7l"
     foreach line $lines {
-        $::realStdout puts -nonewline "$line\033\[K\n"
+        stream write $realStdout "$line\033\[K\n"
     }
     # Blank out leftover lines from a previously longer render.
     set extra [expr {$prevLineCount - [llength $lines]}]
     for {set i 0} {$i < $extra} {incr i} {
-        $::realStdout puts -nonewline "\033\[K\n"
+        stream write $realStdout "\033\[K\n"
     }
-    $::realStdout puts -nonewline "\033\[?7h"
+    stream write $realStdout "\033\[?7h"
     if {[llength $lines] > $prevLineCount} {
         set prevLineCount [llength $lines]
     }
