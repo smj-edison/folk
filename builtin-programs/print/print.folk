@@ -131,8 +131,8 @@ fn codeToPostScript {id code opts {marginsVar {}}} {
     set outPages [list]
     set lineIdx 0
     while {[llength $lines] > 0} {
-        set pageLines [lrange $lines 0 $maxLines-1]
-        set lines [lreplace $lines 0 $maxLines-1]
+        set pageLines [lrange $lines 0 $($maxLines-1)]
+        set lines [lreplace $lines 0 $($maxLines-1)]
 
         set pageLineIdx 0
         # The typesetting here is meant to exactly duplicate the

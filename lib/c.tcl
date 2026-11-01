@@ -116,8 +116,40 @@ set C {
         extern __thread jmp_buf __onError;
         extern __thread bool __onErrorIsSet;
 
+        typedef struct __CapCleanup {
+            Zicl_CapHead* heads[16];
+            int count;
+        } __CapCleanup;
+        static __thread __CapCleanup __capCleanup;
+
+        static inline void __capCleanupDefer(Zicl_CapHead* head) {
+            if (__capCleanup.count < 16) {
+                __capCleanup.heads[__capCleanup.count++] = head;
+            }
+        }
+
+        static inline void __capCleanupRunTo(int base) {
+            while (__capCleanup.count > base) {
+                Zicl_CapDropInFlight(__capCleanup.heads[--__capCleanup.count]);
+            }
+        }
+
         #define __ENSURE(EXPR) if (!(EXPR)) { Zicl_SetErrorString(interp, "failed to convert argument from Tcl to C in: " #EXPR, -1); longjmp(__onError, 0); }
         #define __ENSURE_OK(EXPR) if ((EXPR) != ZICL_OK) { longjmp(__onError, 0); }
+
+        static inline BufferCap* BufferCap_unwrap(Zicl_Interp* interp, Zicl_Shim* shim) {
+            Zicl_CapHead* head = NULL;
+            __ENSURE_OK(Zicl_ResolveCap(interp, shim, &BufferCapVTable, &head));
+            __capCleanupDefer(head);
+            return Zicl_ContainerOf(head, BufferCap, head);
+        }
+
+        static inline Zicl_Val BufferCap_wrap(BufferCap* buf) {
+            Zicl_Val out;
+            folkZiclAssert(Zicl_BoxCap(&buf->head, &out));
+            Zicl_CapDropRef(&buf->head);
+            return out;
+        }
 
         #define FOLK_ERROR(...) do { \
             char __msg[1024]; snprintf(__msg, 1024, ##__VA_ARGS__); \
@@ -135,8 +167,6 @@ set C {
 
     objtypes {}
     extendedObjtypes {}
-    captypes {}
-    extendedCaptypes {}
 
     extends {}
 
@@ -167,6 +197,7 @@ set C {
         char* {identity { char* $argname = (char*) ziclShimString($shim); } }
         Zicl_Val {identity { Zicl_Val $argname = Zicl_Current($shim); }}
         Zicl_Shim* {identity { Zicl_Shim* $argname = $shim; }}
+        BufferCap* {identity { BufferCap* $argname = BufferCap_unwrap(interp, $shim); }}
         default {
             if {[string index $argtype end] eq "*"} {
                 identity {
@@ -248,6 +279,7 @@ set C {
         intptr_t {identity { $robj = Zicl_NewLong($rvalue); }}
         char* {identity { $robj = ziclNewString($rvalue, -1); } }
         Zicl_Val {identity { $robj = $rvalue; }}
+        BufferCap* {identity { $robj = BufferCap_wrap($rvalue); }}
         default {
             if {[string index $rtype end] eq "*"} {
                 identity { folkZiclAssert(Zicl_NewStringFormatted(&$robj, "($rtype) 0x%" PRIxPTR, (uintptr_t) $rvalue)); }
@@ -282,14 +314,6 @@ set C {
 
     cflags {-I./vendor/zicl/zig-out/include -I./}
     endcflags {}
-
-    cfile {}
-
-    ___addrs_comment {
-        # Used to store function pointers so you can import them
-        # across modules.
-    }
-    addrs {}
 }
 
 # Registers a new argtype.
@@ -312,11 +336,6 @@ method C::ret {self rtype robj rvalue} {
 }
 
 method C::include {self h} {
-    if {[llength $h] > 1} {
-        lappend self::code $h :extend
-        return
-    }
-
     if {[string index $h 0] eq "<"} {
         lappend self::code "#include $h" :extend
     } else {
@@ -326,10 +345,11 @@ method C::include {self h} {
 
 method C::addcode {self newcode {extendArg {:noextend}}} {
     lassign [info source $newcode] filename line
-    if {$filename ne ""} { 
+    if {$filename ne ""} {
         set newcode [subst {
-            $newcode
-        }]
+#line $line "$filename"
+$newcode
+}]
     }
     lappend self::code $newcode {*}$extendArg
     list
@@ -357,17 +377,6 @@ method C::define {self newvars} {
     }
 }
 
-method C::enum {self type values} {
-    lappend self::code [subst {
-        typedef enum $type $type;
-        enum $type {$values};
-    }] :extend
-
-    regsub -all {,} $values "" values
-    self::argtype $type [dict get $self::argtypes int]
-    self::rtype $type [dict get $self::rtypes int]
-}
-
 method C::typedef {self t newt {emitC true}} {
     if {$emitC} {
         lappend self::code "typedef $t $newt;" :extend
@@ -391,152 +400,14 @@ method C::typedef {self t newt {emitC true}} {
     }
 }
 
-method C::addcap {self basetype urlsegment args} {
-    set urlsegment [string trimleft $urlsegment /]
-    if {$urlsegment eq ""} {
-        error "C addcap: urlsegment is required for capability '$basetype'"
-    }
-    set exact false
-    foreach arg $args {
-        if {$arg eq "-exact"} {
-            set exact true
-        }
-    }
-    if {[string index $basetype end] eq "*"} {
-        set ctype $basetype
-        set ident [string trimright $basetype "* "]
-    } elseif {$exact} {
-        set ctype $basetype
-        set ident [string map {* _ptr " " _} $basetype]
-    } else {
-        set ctype "${basetype}*"
-        set ident $basetype
-    }
-
-    if {[dict exists $self::captypes $ident]} { return }
-
-    dict set self::captypes $ident [dict create ctype $ctype urlsegment $urlsegment]
-
-    self::argtype $ctype [csubst {
-        $ctype \$argname = ${ident}_unwrap(\$shim);
-    }]
-    self::rtype $ctype [csubst {
-        \$robj = ${ident}_wrapFresh(\$rvalue);
-    }]
-}
-
-method C::emitCaptypeCode {self ident} {
-    set info [dict get $self::captypes $ident]
-    set ctype [dict get $info ctype]
-    set urlsegment [dict get $info urlsegment]
-    set isExtended [dict exists $self::extendedCaptypes $ident]
-
-    if {$isExtended} {
-        csubst {
-            typedef struct {
-                Zicl_CapHead head;
-                $ctype ptr;
-            } ${ident}_capBacking;
-
-            #ifdef __cplusplus
-            extern "C" {
-            #endif
-            const Zicl_CapHeadVTable* ${ident}_capVtable_ptr = NULL;
-            #ifdef __cplusplus
-            }
-            #endif
-
-            static inline $ctype ${ident}_unwrap(Zicl_Shim* shim) {
-                Zicl_CapHead* head = NULL;
-                __ENSURE_OK(Zicl_ResolveCap(interp, shim, ${ident}_capVtable_ptr, &head));
-                $ctype ret = Zicl_ContainerOf(head, ${ident}_capBacking, head)->ptr;
-                Zicl_CapDropInFlight(head);
-                return ret;
-            }
-            static inline $ctype ${ident}_unwrapValue(Zicl_Val val) {
-                Zicl_Shim shim = Zicl_NewShim(val);
-                $ctype ret = ${ident}_unwrap(&shim);
-                Zicl_ShimDiscardChanges(&shim);
-                return ret;
-            }
-            static inline Zicl_Val ${ident}_wrapFresh($ctype ptr) {
-                ${ident}_capBacking* backing = (${ident}_capBacking*) malloc(sizeof(${ident}_capBacking));
-                memset(&backing->head, 0, sizeof(backing->head));
-                backing->head.vtable = ${ident}_capVtable_ptr;
-                backing->ptr = ptr;
-                Zicl_Val out;
-                folkZiclAssert(Zicl_CapNew(&backing->head, &out));
-                return out;
-            }
-            static inline Zicl_Val ${ident}_wrap($ctype ptr) {
-                return ${ident}_wrapFresh(ptr);
-            }
-        }
-    } else {
-        csubst {
-            typedef struct {
-                Zicl_CapHead head;
-                $ctype ptr;
-            } ${ident}_capBacking;
-
-            static void ${ident}_deinitBody(Zicl_CapHead* head) {
-                // TODO: figure out destructors.
-                (void)head;
-            }
-            static void ${ident}_destroyBacking(Zicl_CapHead* head) {
-                free(Zicl_ContainerOf(head, ${ident}_capBacking, head));
-            }
-            #ifdef __cplusplus
-            extern "C" {
-            #endif
-            const Zicl_CapHeadVTable ${ident}_capVtable = {
-                .name = "$urlsegment",
-                .deinit_body = ${ident}_deinitBody,
-                .destroy_backing = ${ident}_destroyBacking,
-            };
-            const Zicl_CapHeadVTable* ${ident}_capVtable_ptr = &${ident}_capVtable;
-            #ifdef __cplusplus
-            }
-            #endif
-
-            static inline $ctype ${ident}_unwrap(Zicl_Shim* shim) {
-                Zicl_CapHead* head = NULL;
-                __ENSURE_OK(Zicl_ResolveCap(interp, shim, ${ident}_capVtable_ptr, &head));
-                $ctype ret = Zicl_ContainerOf(head, ${ident}_capBacking, head)->ptr;
-                Zicl_CapDropInFlight(head);
-                return ret;
-            }
-            static inline $ctype ${ident}_unwrapValue(Zicl_Val val) {
-                Zicl_Shim shim = Zicl_NewShim(val);
-                $ctype ret = ${ident}_unwrap(&shim);
-                Zicl_ShimDiscardChanges(&shim);
-                return ret;
-            }
-            static inline Zicl_Val ${ident}_wrapFresh($ctype ptr) {
-                ${ident}_capBacking* backing = (${ident}_capBacking*) malloc(sizeof(${ident}_capBacking));
-                memset(&backing->head, 0, sizeof(backing->head));
-                backing->head.vtable = ${ident}_capVtable_ptr;
-                backing->ptr = ptr;
-                Zicl_Val out;
-                folkZiclAssert(Zicl_CapNew(&backing->head, &out));
-                return out;
-            }
-            static inline Zicl_Val ${ident}_wrap($ctype ptr) {
-                return ${ident}_wrapFresh(ptr);
-            }
-        }
-    }
-}
-
-# Registers a hand-written native object type: `code` must define
-# `${type}_ObjectVTable` (a `Zicl_ObjVTable*` global) and a
-# `void ${type}_init(void)` that fills it in. `C::compile` emits `code` and
-# calls `${type}_init()` from the library's load-time init, and `C::extend`
-# knows to borrow this unit's vtable pointer rather than build a second one.
+# Registers a hand-written object or capability type: `code` must define
+# `${type}_VTable` (a `const Zicl_ObjVTable*` or `const Zicl_CapHeadVTable*`
+# global initialized to a static vtable). `C::compile` emits `code`, and
+# `C::extend` borrows this unit's `${type}_VTable` pointer via `dynlib lookup`
+# so values and capabilities round-trip across units.
 #
 # `C::struct` is the generated-code path onto the same hook; this is the
-# hand-written one, for a type whose marshaling `C::struct` can't express --
-# e.g. a variable-size struct behind a pointer, like AprilTag's `matd_t*`.
+# hand-written one, for a type whose marshaling `C::struct` can't express.
 method C::objtype {self type code} {
     if {[dict exists $self::objtypes $type]} {
         error "C objtype: already registered: $type"
@@ -573,71 +444,50 @@ method C::struct {self type fields} {
 
     self::include <string.h>
     dict set self::objtypes $type [csubst {
-        Zicl_ObjVTable* $[set type]_ObjectVTable;
+        extern const Zicl_ObjVTable* $[set type]_VTable;
+
+        static inline $type* $[set type]_fromObj(const Zicl_Obj* objPtr) {
+            return (sizeof($type) > ZICL_OBJECT_BODY_MAX_SIZE)
+                ? *(($type* const*)&objPtr->body_backing)
+                : ($type*)&objPtr->body_backing;
+        }
+
+        static inline Zicl_Obj* $[set type]_allocObj($type** out_struct) {
+            size_t body_size = (sizeof($type) > ZICL_OBJECT_BODY_MAX_SIZE) ? sizeof($type*) : sizeof($type);
+            void* body = NULL;
+            Zicl_Obj* obj = Zicl_NewObj($[set type]_VTable, body_size, &body);
+            if (obj == NULL) return NULL;
+            if (sizeof($type) > ZICL_OBJECT_BODY_MAX_SIZE) {
+                $type* allocated = malloc(sizeof($type));
+                *(($type**)body) = allocated;
+                *out_struct = allocated;
+            } else {
+                *out_struct = ($type*)body;
+            }
+            return obj;
+        }
 
         void $[set type]_freeIntRepProc(Zicl_Obj* objPtr) {
-            $type* struct_ptr = NULL;
-            if (sizeof($type) > ZICL_OBJECT_BODY_MAX_SIZE) {
-                struct_ptr = *(($type**)&objPtr->body_backing);
-            } else {
-                struct_ptr = ($type*)&objPtr->body_backing;
-            }
-
+            $type* struct_ptr = $[set type]_fromObj(objPtr);
             $[foreachZiclValueField $fields "struct_ptr" {Zicl_DropRef(%V);}]
-
-            if (sizeof($type) > ZICL_OBJECT_BODY_MAX_SIZE) {
-                // The body is a pointer to the struct we allocated, since it was
-                // too big to fit into the backing.
-                free(struct_ptr);
-            }
+            if (sizeof($type) > ZICL_OBJECT_BODY_MAX_SIZE) free(struct_ptr);
         }
         Zicl_Obj* $[set type]_dupIntRepProc(const Zicl_Obj* srcPtr) {
-            $type* allocated_struct = NULL;
-            size_t struct_size = sizeof($type);
-            // If the struct size is larger than what Zicl allows to be in the object
-            // body, we allocate the struct separately.
-            if (sizeof($type) > ZICL_OBJECT_BODY_MAX_SIZE) {
-                allocated_struct = malloc(sizeof($type));
-                struct_size = sizeof($type*);
-            }
-
-            void* body = NULL;
-            Zicl_Obj* new_object = Zicl_NewObj($[set type]_ObjectVTable, struct_size, &body);
-
-            $type* dest_struct;
-            if (sizeof($type) > ZICL_OBJECT_BODY_MAX_SIZE) {
-                $type* src_struct = *(($type**)&srcPtr->body_backing);
-                memcpy(allocated_struct, src_struct, sizeof($type));
-                *(($type**)body) = allocated_struct;
-                dest_struct = allocated_struct;
-            } else {
-                *(($type*)body) = *(($type*)&srcPtr->body_backing);
-                dest_struct = ($type*)body;
-            }
-
+            $type* dest_struct = NULL;
+            Zicl_Obj* new_object = $[set type]_allocObj(&dest_struct);
+            if (new_object == NULL) return NULL;
+            *dest_struct = *$[set type]_fromObj(srcPtr);
             (void)dest_struct; // unused if $fields has no Zicl_Val field
             $[foreachZiclValueField $fields "dest_struct" {%V = Zicl_Ref(%V);}]
-
             return new_object;
         }
         void $[set type]_makeCrossthreadProc(Zicl_Obj* objPtr) {
-            $type* struct_ptr = NULL;
-            if (sizeof($type) > ZICL_OBJECT_BODY_MAX_SIZE) {
-                struct_ptr = *(($type**)&objPtr->body_backing);
-            } else {
-                struct_ptr = ($type*)&objPtr->body_backing;
-            }
-
+            $type* struct_ptr = $[set type]_fromObj(objPtr);
             (void)struct_ptr; // unused if $fields has no Zicl_Val field
             $[foreachZiclValueField $fields "struct_ptr" {Zicl_MakeCrossthread(%V);}]
         }
         int $[set type]_updateStringProc(Zicl_Obj* objPtr) {
-            $type* struct_ptr = NULL;
-            if (sizeof($type) > ZICL_OBJECT_BODY_MAX_SIZE) {
-                struct_ptr = *(($type**)&objPtr->body_backing);
-            } else {
-                struct_ptr = ($type*)&objPtr->body_backing;
-            }
+            $type* struct_ptr = $[set type]_fromObj(objPtr);
 
             const char *format = "$[join [lmap fieldname $fieldnames {
                 subst {$fieldname {%s}}
@@ -660,7 +510,7 @@ method C::struct {self type fields} {
             return ZICL_OK;
         }
         int $[set type]_shimmerFrom(Zicl_Interp *interp, Zicl_Shim* shim, $type** out) {
-            void* body = Zicl_AsObjBody(Zicl_Current(shim), $[set type]_ObjectVTable);
+            void* body = Zicl_AsObjBody(Zicl_Current(shim), $[set type]_VTable);
             if (body) {
                 *out = (sizeof($type) > ZICL_OBJECT_BODY_MAX_SIZE) ? *($type**)body : ($type*)body;
                 return ZICL_OK;
@@ -683,36 +533,30 @@ method C::struct {self type fields} {
                 }
             }] "\n"]
 
-            void* new_body = Zicl_PrepareToShimmer(shim, $[set type]_ObjectVTable);
+            void* new_body = Zicl_PrepareToShimmer(shim, $[set type]_VTable);
             if (sizeof($type) > ZICL_OBJECT_BODY_MAX_SIZE) {
                 $type* allocated_struct = malloc(sizeof($type));
-                memcpy(allocated_struct, &robj, sizeof($type));
+                *allocated_struct = robj;
                 *(($type**)new_body) = allocated_struct;
                 *out = allocated_struct;
             } else {
-                memcpy(new_body, &robj, sizeof($type));
+                *(($type*)new_body) = robj;
                 *out = ($type*)new_body;
             }
 
             return ZICL_OK;
         }
 
-        /* Constructs the vtable. Must run once, before any value of this
-           type is created or shimmered -- the library's generated init
-           function calls this for every objtype right after load. */
-        void $[set type]_init(void) {
-            $[set type]_ObjectVTable = malloc(sizeof(Zicl_ObjVTable));
-            *$[set type]_ObjectVTable = (Zicl_ObjVTable) {
-                .is_c_vtable = true,
-                .name = "$type",
-                .duplicate = $[set type]_dupIntRepProc,
-                .free_internal_rep = $[set type]_freeIntRepProc,
-                .update_string = $[set type]_updateStringProc,
-                .make_crossthread = $[set type]_makeCrossthreadProc,
-                .enumerate_struct = NULL
-                // .shimmerFrom = $[set type]_shimmerFrom
-            };
-        }
+        static const Zicl_ObjVTable $[set type]_vtable = {
+            .is_c_vtable = true,
+            .name = "$type",
+            .duplicate = $[set type]_dupIntRepProc,
+            .free_internal_rep = $[set type]_freeIntRepProc,
+            .update_string = $[set type]_updateStringProc,
+            .make_crossthread = $[set type]_makeCrossthreadProc,
+            .enumerate_struct = NULL
+        };
+        const Zicl_ObjVTable* $[set type]_VTable = &$[set type]_vtable;
     }]
 
     self::argtype $type [csubst {
@@ -726,80 +570,14 @@ method C::struct {self type fields} {
 
     self::rtype $type [csubst {
         {
-            size_t struct_size = sizeof($type);
-            if (sizeof($type) > ZICL_OBJECT_BODY_MAX_SIZE) { struct_size = sizeof($type*); }
-
-            void* body = NULL;
-            Zicl_Obj* obj = Zicl_NewObj($[set type]_ObjectVTable, struct_size, &body);
-
-            $type* dest_struct;
-            if (sizeof($type) > ZICL_OBJECT_BODY_MAX_SIZE) {
-                dest_struct = malloc(sizeof($type));
-                *(($type**)body) = dest_struct;
-            } else {
-                dest_struct = ($type*)body;
-            }
+            $type* dest_struct = NULL;
+            Zicl_Obj* obj = $[set type]_allocObj(&dest_struct);
+            if (obj == NULL) folkZiclAssert(ZICL_OOM);
             *dest_struct = \$rvalue;
-
             $[foreachZiclValueField $fields {dest_struct} {%V = Zicl_Ref(%V);}]
-
             \$robj = Zicl_BoxObject(obj);
         }
     }]
-
-    # Generate Tcl getter functions for each field:
-    foreach {fieldtype fieldname} $fields {
-        try {
-            if {$fieldtype ne "Zicl_Val" &&
-                [regexp {(^[^\[]+)(?:\[(\d*)\]|\*)(?:\[(\d+)\])?$} $fieldtype -> basefieldtype arraylen arraylen2]} {
-                if {$basefieldtype eq "char"} {
-                    self::proc ${type}_$fieldname {Zicl_Interp* interp Zicl_Shim* shim} char* {
-                        $type* struct_ptr;
-                        __ENSURE_OK($[set type]_shimmerFrom(interp, shim, &struct_ptr));
-                        return struct_ptr->$fieldname;
-                    }
-                } else {
-                    if {$arraylen2 eq ""} {
-                        self::proc ${type}_${fieldname}_ptr {Zicl_Interp* interp Zicl_Shim* shim} $basefieldtype* {
-                            $type* struct_ptr;
-                            __ENSURE_OK($[set type]_shimmerFrom(interp, shim, &struct_ptr));
-                            return struct_ptr->$fieldname;
-                        }
-                        set elementtype $basefieldtype
-                    } else {
-                        set elementtype $basefieldtype\[$arraylen2\]
-                    }
-                    # If fieldtype is a pointer or an array,
-                    # then make a getter that takes an index.
-                    self::proc ${type}_$fieldname {Zicl_Interp* interp Zicl_Shim* shim int idx} $elementtype {
-                        $type* struct_ptr;
-                        __ENSURE_OK($[set type]_shimmerFrom(interp, shim, &struct_ptr));
-                        return struct_ptr->$fieldname[idx];
-                    }
-                }
-            } elseif {$fieldtype eq "Zicl_Val"} {
-                # The field is itself a Zicl_Val living inside the struct, so
-                # borrow it before returning: it may point into a shimmered
-                # duplicate whose lifetime we don't own (see argtypes.Zicl_Val),
-                # and self::ret's Zicl_Val conversion is a bare alias that
-                # expects an already-owned reference, same as elsewhere in this
-                # codebase (e.g. folk.c's `Zicl_Ref(bTerms[i])`).
-                self::proc ${type}_$fieldname {Zicl_Interp* interp Zicl_Shim* shim} $fieldtype {
-                    $type* struct_ptr;
-                    __ENSURE_OK($[set type]_shimmerFrom(interp, shim, &struct_ptr));
-                    return Zicl_Ref(struct_ptr->$fieldname);
-                }
-            } else {
-                self::proc ${type}_$fieldname {Zicl_Interp* interp Zicl_Shim* shim} $fieldtype {
-                    $type* struct_ptr;
-                    __ENSURE_OK($[set type]_shimmerFrom(interp, shim, &struct_ptr));
-                    return struct_ptr->$fieldname;
-                }
-            }
-        } on error e {
-            puts stderr "Warning: Unable to generate getter for `$type $fieldname`: $e"
-        }
-    }
 }
 
 method C::proc {self name arguments rtype body} {
@@ -829,19 +607,13 @@ method C::proc {self name arguments rtype body} {
         set res [typestyle $argtype $argname]
         lappend loadargs [self::arg {*}$res $obj]
     }
-    if {[regexp {^([^\[]+)(\[.*)?$} $rtype -> decayedRtype rtypeBrackets]} {
-        if {$rtypeBrackets ne ""} {
-            regsub {\[\d*\]} $rtypeBrackets * rtypeBrackets
-            append decayedRtype $rtypeBrackets
-        }
-    }
     if {$rtype eq "void"} {
         set saverv [subst {
             $cname ([join $argnames ", "]);
         }]
     } else {
         set saverv [subst {
-            $decayedRtype rvalue = $cname ([join $argnames ", "]);
+            $rtype rvalue = $cname ([join $argnames ", "]);
             Zicl_Val robj;
             [self::ret $rtype robj rvalue]
             Zicl_SetResultOwning(interp, robj);
@@ -852,9 +624,9 @@ method C::proc {self name arguments rtype body} {
     dict set self::procs $name rtype $rtype
     dict set self::procs $name arglist $arglist
     dict set self::procs $name code [subst {
-        $decayedRtype $cname ([join $arglist ", "]) {
+        $rtype $cname ([join $arglist ", "]) {
             [if {$filename ne ""} {
-                subst {}
+                subst {#line $line "$filename"}
             } else {list}]
             $body
         }
@@ -864,6 +636,7 @@ method C::proc {self name arguments rtype body} {
                 Zicl_SetResultString(interp, "Wrong number of arguments to $name", -1);
                 return ZICL_ERR;
             }
+            int __capCleanupBase = __capCleanup.count;
             bool didSetOnError = false;
             if (!__onErrorIsSet) {
                 int __r = setjmp(__onError);
@@ -872,6 +645,7 @@ method C::proc {self name arguments rtype body} {
 
                 if (__r != 0) {
                     __onErrorIsSet = false;
+                    __capCleanupRunTo(__capCleanupBase);
                     return ZICL_ERR;
                 }
             }
@@ -879,6 +653,7 @@ method C::proc {self name arguments rtype body} {
             [join $loadargs "\n"]
             $saverv
 
+            __capCleanupRunTo(__capCleanupBase);
             if (didSetOnError) {
                 __onErrorIsSet = false;
             }
@@ -929,22 +704,9 @@ method C::compile {self args} {
             Zicl_Val __pairs\[$nProcs * 2\];
             int __n = 0;
 
-            [join [lmap type [dict keys $self::objtypes] {
-                if {[dict exists $self::extendedObjtypes $type]} {
-                    set addr [dynlib lookup [dict get $self::extendedObjtypes $type] ${type}_ObjectVTable]
-                    subst {${type}_ObjectVTable = *(Zicl_ObjVTable**) ${addr}UL;}
-                } else {
-                    subst {${type}_init();}
-                }
-            }] "\n"]
-
-            [join [lmap ident [dict keys $self::captypes] {
-                if {[dict exists $self::extendedCaptypes $ident]} {
-                    set addr [dynlib lookup [dict get $self::extendedCaptypes $ident] ${ident}_capVtable_ptr]
-                    subst {${ident}_capVtable_ptr = *(const Zicl_CapHeadVTable**) ${addr}UL;}
-                } else {
-                    list
-                }
+            [join [lmap {type srcCap} $self::extendedObjtypes {
+                set addr [dynlib lookup $srcCap ${type}_VTable]
+                subst {${type}_VTable = *(__typeof__(${type}_VTable)*) ${addr}UL;}
             }] "\n"]
 
             [join [lmap name [dict keys $self::procs] {
@@ -971,17 +733,12 @@ extern "C" \{
 \}
 #endif
 }]
-    set capcode [join [lmap ident [dict keys $self::captypes] {
-        self::emitCaptypeCode $ident
-    }] "\n"]
     set sourcecode [join [list \
                               $externC \
                               $self::prelude \
                               $unexternC \
                               \
                               {*}[lmap {snippet extend} $self::code {set snippet}] \
-                              \
-                              $capcode \
                               \
                               $externC \
                               {*}[dict values $self::objtypes] \
@@ -1014,25 +771,9 @@ extern "C" \{
         puts $out
     }
 
-    # HACK: Why do we need this / only when running in lldb?
-    set n 0
-    while {![file exists [file rootname $cfile].o]} {
-        sleep 0.01
-        incr n
-        if {$n > 1000} { error "Failed on $cfile! Timed out" }
-    }
-
     exec $self::compiler {*}$asan_flags -shared $ignoreUnresolved \
         -O2 -o /tmp/$cid.so [file rootname $cfile].o \
         {*}$self::endcflags
-
-    # HACK: Why do we need this / only when running in lldb?
-    set n 0
-    while {![file exists /tmp/$cid.so]} {
-        sleep 0.01
-        incr n
-        if {$n > 200} { error "Failed on /tmp/$cid.so! Timed out" }
-    }
 
     if {$noload} {
         # Return the name of the compiled file instead of loading it.
@@ -1050,15 +791,10 @@ extern "C" \{
         argtypes $self::argtypes \
         rtypes $self::rtypes \
         objtypes $self::objtypes \
-        captypes $self::captypes \
         procs $self::procs \
         vars $self::vars \
         code $self::code]
     return $fns
-}
-
-method C::string_toupper_first {self s} {
-    return [string toupper [string index $s 0]][string range $s 1 end]
 }
 
 # Declares a function pointer named $destname (default: $srcname) pointing
@@ -1077,13 +813,7 @@ method C::import {self srclib srcname {destname {}}} {
 
     set cname [string map {":" "_" "!" "_"} $srcname]
     set addr [dynlib lookup $srcCap $cname]
-    if {[regexp {^([^\[]+)(\[.*)?$} $rtype -> decayedRtype rtypeBrackets]} {
-        if {$rtypeBrackets ne ""} {
-            regsub {\[\d*\]} $rtypeBrackets * rtypeBrackets
-            append decayedRtype $rtypeBrackets
-        }
-    }
-    self::addcode "$decayedRtype (*$destname) ([join $arglist {, }]) = ($decayedRtype (*) ([join $arglist {, }])) ${addr}UL;"
+    self::addcode "$rtype (*$destname) ([join $arglist {, }]) = ($rtype (*) ([join $arglist {, }])) ${addr}UL;"
 }
 
 # Shares another compiled library's types, procs, and vars with this one, so
@@ -1134,15 +864,6 @@ method C::extend {self args} {
         if {![dict exists $self::objtypes $objtype]} {
             dict set self::objtypes $objtype $code
             dict set self::extendedObjtypes $objtype $srcCap
-        }
-    }
-
-    if {[dict exists $srcinfo captypes]} {
-        dict for {ident info} [dict get $srcinfo captypes] {
-            if {![dict exists $self::captypes $ident] || ![dict exists $self::extendedCaptypes $ident]} {
-                dict set self::captypes $ident $info
-                dict set self::extendedCaptypes $ident $srcCap
-            }
         }
     }
 

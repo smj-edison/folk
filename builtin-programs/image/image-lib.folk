@@ -3,36 +3,203 @@ cc::include <stdlib.h>
 cc::include <string.h>
 cc::include <math.h>
 
-cc::struct Image {
-    Zicl_CapHead cap_head;
-    // Pointer to whatever capability manages `data`. Will point
-    // to `&cap_head` on either itself or another image.
-    Zicl_CapHead *cap;
-    uint32_t width;
-    uint32_t height;
-    int components;
-    uint32_t bytesPerRow;
+cc::addcode {
+    typedef struct Image {
+        // Pointer to the BufferCap capability head managing `data` (or NULL before
+        // a raw C-allocated buffer is wrapped into an Image Zicl_Obj).
+        Zicl_CapHead *cap;
+        uint32_t index;
+        uint32_t width;
+        uint32_t height;
+        int components;
+        uint32_t bytesPerRow;
 
-    // Weird: this can be mutated if you want the image to be
-    // reloaded into the GPU.
-    uint64_t uniq;
+        // Weird: this can be mutated if you want the image to be
+        // reloaded into the GPU.
+        uint64_t uniq;
 
-    uint8_t* data;
+        // Computed pointer (`buf->data + index`) for C callers.
+        uint8_t* data;
+    } Image;
+} :extend
+
+cc::objtype Image {
+    extern const Zicl_ObjVTable* Image_VTable;
+
+    static Image* Image_fromObject(const Zicl_Obj* obj) {
+        return *(Image**) Zicl_ObjBodyConst(obj);
+    }
+
+    void Image_freeIntRepProc(Zicl_Obj* objPtr) {
+        Image* im = *(Image**) Zicl_ObjBody(objPtr);
+        if (im->cap) Zicl_CapDropRef(im->cap);
+        free(im);
+    }
+
+    Zicl_Obj* Image_dupIntRepProc(const Zicl_Obj* srcPtr) {
+        Image* allocated = (Image*) malloc(sizeof(Image));
+        if (allocated == NULL) return NULL;
+        void* body = NULL;
+        Zicl_Obj* newObject = Zicl_NewObj(Image_VTable, sizeof(Image*), &body);
+        if (newObject == NULL) { free(allocated); return NULL; }
+        *allocated = *Image_fromObject(srcPtr);
+        if (allocated->cap) Zicl_CapTakeRef(allocated->cap);
+        *(Image**) body = allocated;
+        return newObject;
+    }
+
+    int Image_updateStringProc(Zicl_Obj* objPtr) {
+        Image* im = *(Image**) Zicl_ObjBody(objPtr);
+        Zicl_Val capVal;
+        int rc = Zicl_BoxCap(im->cap, &capVal);
+        if (rc != ZICL_OK) return rc;
+        defer { Zicl_DropRef(capVal); }
+        const char* capStr = ziclString(capVal);
+
+        const char* format = "cap {%s} index {%" PRIu32 "} width {%" PRIu32 "} height {%" PRIu32 "} components {%d} bytesPerRow {%" PRIu32 "} uniq {%" PRIu64 "}";
+        size_t len = (size_t)snprintf(NULL, 0, format,
+            capStr, im->index, im->width, im->height, im->components, im->bytesPerRow, im->uniq);
+        char* bytes = (char*) malloc(len + 1);
+        if (bytes == NULL) return ZICL_OOM;
+        defer { free(bytes); }
+        snprintf(bytes, len + 1, format,
+            capStr, im->index, im->width, im->height, im->components, im->bytesPerRow, im->uniq);
+        return Zicl_SetObjectString(objPtr, bytes, (int)len);
+    }
+
+    int Image_shimmerFrom(Zicl_Interp* interp, Zicl_Shim* shim, Image** out) {
+        void* body = Zicl_AsObjBody(Zicl_Current(shim), Image_VTable);
+        if (body) { *out = *(Image**) body; return ZICL_OK; }
+
+        int rc = ZICL_OK;
+        Zicl_OptVal optCap;
+        ZICL_TRY(Zicl_ShimDictGet(interp, shim, Zicl_InternStr("cap"), &optCap), rc);
+        if (!Zicl_IsSome(optCap)) {
+            Zicl_SetErrorString(interp, "Image missing cap field", -1);
+            return ZICL_ERR;
+        }
+        Zicl_Shim capShim = Zicl_NewShim(Zicl_Unwrap(optCap));
+        defer { Zicl_ShimDiscardChanges(&capShim); }
+
+        Zicl_CapHead* head = NULL;
+        ZICL_TRY(Zicl_ResolveCap(interp, &capShim, &BufferCapVTable, &head), rc);
+        defer { if (head) Zicl_CapDropInFlight(head); }
+
+        long index, width, height, components, bytesPerRow, uniq;
+        ZICL_TRY(ziclShimDictGetLong(interp, shim, "index", &index), rc);
+        ZICL_TRY(ziclShimDictGetLong(interp, shim, "width", &width), rc);
+        ZICL_TRY(ziclShimDictGetLong(interp, shim, "height", &height), rc);
+        ZICL_TRY(ziclShimDictGetLong(interp, shim, "components", &components), rc);
+        ZICL_TRY(ziclShimDictGetLong(interp, shim, "bytesPerRow", &bytesPerRow), rc);
+        ZICL_TRY(ziclShimDictGetLong(interp, shim, "uniq", &uniq), rc);
+
+        if (index < 0 || width < 0 || height < 0 || components < 0 || bytesPerRow < 0) {
+            Zicl_SetErrorString(interp, "Image fields must be non-negative", -1);
+            return ZICL_ERR;
+        }
+        if (height > 0 && (size_t)width * (size_t)components > (size_t)bytesPerRow) {
+            Zicl_SetErrorString(interp, "Image width * components exceeds bytesPerRow", -1);
+            return ZICL_ERR;
+        }
+        BufferCap* buf = Zicl_ContainerOf(head, BufferCap, head);
+        size_t requiredEnd = (size_t)index;
+        if (height > 0 && width > 0 && components > 0) {
+            requiredEnd += (size_t)(height - 1) * (size_t)bytesPerRow + (size_t)width * (size_t)components;
+        }
+        if (requiredEnd > buf->size) {
+            Zicl_SetErrorString(interp, "Image slice exceeds buffer size", -1);
+            return ZICL_ERR;
+        }
+
+        Image* allocated = (Image*) malloc(sizeof(Image));
+        if (allocated == NULL) return ZICL_OOM;
+        *allocated = (Image) {
+            .cap = Zicl_CapTakeRef(head),
+            .index = (uint32_t)index,
+            .width = (uint32_t)width,
+            .height = (uint32_t)height,
+            .components = (int)components,
+            .bytesPerRow = (uint32_t)bytesPerRow,
+            .uniq = (uint64_t)uniq,
+            .data = buf->data + (uint32_t)index,
+        };
+
+        void* newBody = Zicl_PrepareToShimmer(shim, Image_VTable);
+        if (newBody == NULL) {
+            Zicl_CapDropRef(allocated->cap);
+            free(allocated);
+            return ZICL_OOM;
+        }
+        *(Image**) newBody = allocated;
+        *out = allocated;
+        return ZICL_OK;
+    }
+
+    static const Zicl_ObjVTable Image_vtable = {
+        .is_c_vtable = true,
+        .name = "Image",
+        .duplicate = Image_dupIntRepProc,
+        .free_internal_rep = Image_freeIntRepProc,
+        .update_string = Image_updateStringProc,
+        .make_crossthread = Zicl_NoopMakeCrossthread,
+        .enumerate_struct = NULL,
+    };
+    const Zicl_ObjVTable* Image_VTable = &Image_vtable;
+
+    static inline Image Image_unwrap(Zicl_Interp* interp, Zicl_Shim* shim) {
+        Image* imPtr = NULL;
+        __ENSURE_OK(Image_shimmerFrom(interp, shim, &imPtr));
+        __ENSURE_OK(Zicl_CapMarkInFlight(interp, imPtr->cap));
+        __capCleanupDefer(imPtr->cap);
+        BufferCap* buf = Zicl_ContainerOf(imPtr->cap, BufferCap, head);
+        Image im = *imPtr;
+        im.data = buf->data + im.index;
+        return im;
+    }
+
+    static inline Zicl_Val Image_wrap(Image im) {
+        if (im.cap == NULL) {
+            BufferCap* buf = bufferCapNewFromPtr(im.data, (size_t)im.height * im.bytesPerRow);
+            im.cap = &buf->head;
+            im.index = 0;
+        } else {
+            Zicl_CapTakeRef(im.cap);
+        }
+        Image* allocated = (Image*) malloc(sizeof(Image));
+        *allocated = im;
+        void* body = NULL;
+        Zicl_Obj* obj = Zicl_NewObj(Image_VTable, sizeof(Image*), &body);
+        if (obj == NULL) folkZiclAssert(ZICL_OOM);
+        *(Image**) body = allocated;
+        return Zicl_BoxObject(obj);
+    }
+}
+cc::argtype Image {
+    Image $argname = Image_unwrap(interp, $shim);
+}
+cc::rtype Image {
+    $robj = Image_wrap($rvalue);
+}
+
+cc::proc data {Image im int idx} int {
+    FOLK_ENSURE(idx >= 0 && (size_t)idx < (size_t)im.height * im.bytesPerRow);
+    return im.data[idx];
 }
 
 # Note that this returns an image whose lifetime is tied to the original image.
-cc::proc slice {Zicl_Val im double x double y double subwidth double subheight} Zicl_Val {
-    
-    uint8_t *subdata = im.data + (int)y*im.bytesPerRow + (int)x*im.components;
+cc::proc slice {Image im double x double y double subwidth double subheight} Image {
+    FOLK_ENSURE(x >= 0 && y >= 0 && subwidth >= 0 && subheight >= 0);
+    FOLK_ENSURE((uint32_t)x + (uint32_t)subwidth <= im.width &&
+                (uint32_t)y + (uint32_t)subheight <= im.height);
+    uint32_t suboffset = (uint32_t)y * im.bytesPerRow + (uint32_t)x * (uint32_t)im.components;
     return (Image) {
-        .cap_head = { .vtable = NULL },
-        // Use capability of parent.
-        .cap = Zicl_CapTakeRef(im.cap),
+        .cap = im.cap,
+        .index = im.index + suboffset,
         .width = (uint32_t)subwidth,
         .height = (uint32_t)subheight,
         .components = im.components,
         .bytesPerRow = im.bytesPerRow,
-        .data = subdata,
+        .data = im.data + suboffset,
         .uniq = im.uniq
     };
 }
@@ -202,8 +369,8 @@ cc::proc paddedCropAt {Image im double centerXDouble double centerYDouble
     }
     return result;
 }
-cc::proc imageFree {Image image} void {
-    free(image.data);
+cc::proc imageFree {Image im} void {
+    Zicl_CapClose(im.cap);
 }
 
 cc::addcode {

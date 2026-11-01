@@ -20,7 +20,52 @@ if {[info exists this] && $tcl_platform::os eq "darwin"} {
 # Vulkan handle type was ever actually registered.
 set Vulkan [dict link $C {}]
 method Vulkan::defineHandleType {self type} {
-    self::addcap $type [string tolower $type] -exact
+    if {[dict exists $self::objtypes $type]} { return }
+    set urlsegment [string tolower $type]
+    self::objtype $type [csubst {
+        typedef struct ${type}_Cap {
+            Zicl_CapHead head;
+            $type handle;
+        } ${type}_Cap;
+
+        static void ${type}_deinitBody(Zicl_CapHead* head) {
+            (void)head;
+        }
+
+        static void ${type}_destroyBacking(Zicl_CapHead* head) {
+            free(Zicl_ContainerOf(head, ${type}_Cap, head));
+        }
+
+        static const Zicl_CapHeadVTable ${type}_vtable = {
+            .name = "$urlsegment",
+            .deinit_body = ${type}_deinitBody,
+            .destroy_backing = ${type}_destroyBacking,
+        };
+        const Zicl_CapHeadVTable* ${type}_VTable = &${type}_vtable;
+
+        static inline $type ${type}_unwrap(Zicl_Interp* interp, Zicl_Shim* shim) {
+            Zicl_CapHead* head = NULL;
+            __ENSURE_OK(Zicl_ResolveCap(interp, shim, ${type}_VTable, &head));
+            __capCleanupDefer(head);
+            return Zicl_ContainerOf(head, ${type}_Cap, head)->handle;
+        }
+
+        static inline Zicl_Val ${type}_wrap($type handle) {
+            ${type}_Cap* backing = (${type}_Cap*) malloc(sizeof(${type}_Cap));
+            memset(&backing->head, 0, sizeof(backing->head));
+            backing->head.vtable = ${type}_VTable;
+            backing->handle = handle;
+            Zicl_Val out;
+            folkZiclAssert(Zicl_CapNew(&backing->head, &out));
+            return out;
+        }
+    }]
+    self::argtype $type [csubst {
+        $type \$argname = ${type}_unwrap(interp, \$shim);
+    }]
+    self::rtype $type [csubst {
+        \$robj = ${type}_wrap(\$rvalue);
+    }]
 }
 Claim the GPU Vulkan C prototype is $Vulkan
 

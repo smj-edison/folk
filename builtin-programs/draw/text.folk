@@ -9,11 +9,51 @@ cc::struct GlyphInfo {
     float planeBounds[4];
     float atlasBounds[4];
 }
-cc::struct Font {
-    Image atlasImage;
-    int gpuAtlasImage;
-    // TODO: This only handles ASCII, obviously.
-    GlyphInfo glyphInfos[128];
+cc::addcode {
+    typedef struct Font {
+        Zicl_CapHead head;
+        Image atlasImage;
+        int gpuAtlasImage;
+        // TODO: This only handles ASCII, obviously.
+        GlyphInfo glyphInfos[128];
+    } Font;
+} :extend
+cc::objtype Font {
+    static void Font_deinitBody(Zicl_CapHead* head) {
+        (void)head;
+    }
+
+    static void Font_destroyBacking(Zicl_CapHead* head) {
+        free(Zicl_ContainerOf(head, Font, head));
+    }
+
+    static const Zicl_CapHeadVTable Font_vtable = {
+        .name = "font",
+        .deinit_body = Font_deinitBody,
+        .destroy_backing = Font_destroyBacking,
+    };
+    const Zicl_CapHeadVTable* Font_VTable = &Font_vtable;
+
+    static inline Font* Font_unwrap(Zicl_Interp* interp, Zicl_Shim* shim) {
+        Zicl_CapHead* head = NULL;
+        __ENSURE_OK(Zicl_ResolveCap(interp, shim, Font_VTable, &head));
+        __capCleanupDefer(head);
+        return Zicl_ContainerOf(head, Font, head);
+    }
+
+    static inline Zicl_Val Font_wrap(Font* font) {
+        memset(&font->head, 0, sizeof(font->head));
+        font->head.vtable = Font_VTable;
+        Zicl_Val out;
+        folkZiclAssert(Zicl_CapNew(&font->head, &out));
+        return out;
+    }
+}
+cc::argtype Font* {
+    Font* $argname = Font_unwrap(interp, $shim);
+}
+cc::rtype Font* {
+    $robj = Font_wrap($rvalue);
 }
 
 cc::struct vec2f { float x; float y; }
@@ -167,7 +207,7 @@ cc::proc fontNew {Image atlasImage int gpuAtlasImage {GlyphInfo[128]} glyphInfos
     return font;
 }
 cc::proc fontFree {Font* font} void {
-    free(font);
+    Zicl_CapClose(&font->head);
 }
 set fontLib [cc::compile]
 

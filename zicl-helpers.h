@@ -60,4 +60,20 @@ Zicl_OptVal ziclDictGetNoFollow(const Zicl_Dict *dict, const char *key);
 bool ziclDictGetStringNoFollow(const Zicl_Dict *dict, const char *key, const char **out);
 Zicl_RetCode ziclDictGetIntNoFollow(Zicl_Interp *interp, const Zicl_Dict *dict, const char *key, int *out);
 Zicl_RetCode ziclDictGetLongNoFollow(Zicl_Interp *interp, const Zicl_Dict *dict, const char *key, long *out);
+Zicl_RetCode ziclShimDictGetInt(Zicl_Interp *interp, Zicl_Shim *dictShim, const char *key, int *out);
+Zicl_RetCode ziclShimDictGetLong(Zicl_Interp *interp, Zicl_Shim *dictShim, const char *key, long *out);
 void ziclDictRemove(Zicl_Dict *dict, const char *key);
+
+typedef struct BufferCap {
+    Zicl_CapHead head;
+    size_t size;
+    uint8_t *data;
+} BufferCap;
+
+extern const Zicl_CapHeadVTable BufferCapVTable;
+
+/* Allocates and registers a BufferCap capability taking ownership of `data`
+ * (freed via `free(data)` when closed and no longer in-flight). Returns with 1
+ * caller reference on `&buf->head` (plus 1 held by the capability registry). */
+BufferCap *bufferCapNewFromPtr(uint8_t *data, size_t size);
+BufferCap *bufferCapNew(size_t size);

@@ -68,8 +68,8 @@ When the print library is /printLib/ &\
         for {set y 0} {$y < 10} {incr y} {
             for {set i 0 } {$i < $scale} {incr i} {
                 for {set x 0} {$x < 10} {incr x} {
-                    set j [expr {$y * [imageLib::Image_bytesPerRow $tagImage] + $x}]
-                    set bit [expr {[imageLib::Image_data $tagImage $j] != 255}]
+                    set j [expr {$y * $tagImage::bytesPerRow + $x}]
+                    set bit [expr {[imageLib::data $tagImage $j] != 255}]
                     lappend tagBits {*}[lrepeat $scale $bit]
                 }
             }

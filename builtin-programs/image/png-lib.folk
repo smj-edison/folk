@@ -68,7 +68,7 @@ cc::proc loadPng {char* filename} Image {
     png_init_io(png, file);
     png_read_info(png, info);
 
-    Image ret;
+    Image ret = {0};
     ret.width = png_get_image_width(png, info);
     ret.height = png_get_image_height(png, info);
     int bytes_per_pixel =  png_get_channels(png, info);

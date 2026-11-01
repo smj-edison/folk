@@ -31,7 +31,7 @@ gpuc::extend $imageLib
 gpuc::include <pthread.h>
 
 gpuc::typedef {struct VmaAllocation_T*} VmaAllocation
-gpuc::addcap VmaAllocation /vma-allocation -exact
+gpuc::defineHandleType VmaAllocation
 
 fn vktry {call} { string map {\n " "} [csubst {{
     VkResult res = $call;

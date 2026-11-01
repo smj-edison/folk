@@ -17,8 +17,8 @@ When the image library is /imageLib/ &\
 
   set im [loadImage $path]
 
-  set sheetWidth [imageLib::Image_width $im]
-  set sheetHeight [imageLib::Image_height $im]
+  set sheetWidth $im::width
+  set sheetHeight $im::height
   set spriteWidth [/ $sheetWidth $columns]
   set rows [/ $frames $columns]
   set spriteHeight [/ $sheetHeight $rows]

@@ -179,8 +179,8 @@ When /nobody/ wishes to calibrate camera /any/ to display /any/ /...etc/ &\
     }
 
     set tags [list]
-    set frameWidth [dict get $frame width]
-    set frameHeight [dict get $frame height]
+    set frameWidth $frame::width
+    set frameHeight $frame::height
     set aprilTime 0
     dict for {id prevDet} $dets {
         set corners [dict get $prevDet p]

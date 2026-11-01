@@ -14,7 +14,7 @@ cc::include <common/homography.h>
 # a Tcl list-of-lists converts into a matrix, and a matrix renders back out
 # as `{a b c} {d e f}`.
 cc::objtype matd {
-    Zicl_ObjVTable* matd_ObjectVTable;
+    extern const Zicl_ObjVTable* matd_VTable;
 
     static matd_t* matd_fromObject(const Zicl_Obj* obj) {
         return *(matd_t**) Zicl_ObjBodyConst(obj);
@@ -25,7 +25,7 @@ cc::objtype matd {
     }
     Zicl_Obj* matd_dupIntRepProc(const Zicl_Obj* srcPtr) {
         void* body = NULL;
-        Zicl_Obj* newObject = Zicl_NewObj(matd_ObjectVTable, sizeof(matd_t*), &body);
+        Zicl_Obj* newObject = Zicl_NewObj(matd_VTable, sizeof(matd_t*), &body);
         if (newObject == NULL) return NULL;
         *(matd_t**) body = matd_copy(matd_fromObject(srcPtr));
         return newObject;
@@ -64,7 +64,7 @@ cc::objtype matd {
        ZICL_OK and leak the matrix, so the assignment is kept inside the
        return rather than as a separate step that can drift apart from it. */
     int matd_shimmerFrom(Zicl_Interp* interp, Zicl_Shim* shim, matd_t** out) {
-        void* body = Zicl_AsObjBody(Zicl_Current(shim), matd_ObjectVTable);
+        void* body = Zicl_AsObjBody(Zicl_Current(shim), matd_VTable);
         if (body) { *out = *(matd_t**) body; return ZICL_OK; }
 
         int rc = ZICL_OK;
@@ -109,27 +109,25 @@ cc::objtype matd {
         }
 
         // Converts `shim` in place, so the list rep is replaced by ours.
-        void* newBody = Zicl_PrepareToShimmer(shim, matd_ObjectVTable);
+        void* newBody = Zicl_PrepareToShimmer(shim, matd_VTable);
         if (newBody == NULL) return (rc = ZICL_OOM);
         *(matd_t**) newBody = mat;
         *out = mat;
         return ZICL_OK;
     }
 
-    void matd_init(void) {
-        matd_ObjectVTable = malloc(sizeof(Zicl_ObjVTable));
-        *matd_ObjectVTable = (Zicl_ObjVTable) {
-            .is_c_vtable = true,
-            .name = "matd_t*",
-            .duplicate = matd_dupIntRepProc,
-            .free_internal_rep = matd_freeIntRepProc,
-            .update_string = matd_updateStringProc,
-            // Nothing in the body another thread could race on: the matrix is
-            // immutable once built, and holds no Zicl_Vals.
-            .make_crossthread = Zicl_NoopMakeCrossthread,
-            .enumerate_struct = NULL
-        };
-    }
+    static const Zicl_ObjVTable matd_vtable = {
+        .is_c_vtable = true,
+        .name = "matd_t*",
+        .duplicate = matd_dupIntRepProc,
+        .free_internal_rep = matd_freeIntRepProc,
+        .update_string = matd_updateStringProc,
+        // Nothing in the body another thread could race on: the matrix is
+        // immutable once built, and holds no Zicl_Vals.
+        .make_crossthread = Zicl_NoopMakeCrossthread,
+        .enumerate_struct = NULL
+    };
+    const Zicl_ObjVTable* matd_VTable = &matd_vtable;
 }
 cc::argtype matd_t* {
     matd_t* $argname;
@@ -138,7 +136,7 @@ cc::argtype matd_t* {
 cc::rtype matd_t* {
     {
         void* body = NULL;
-        Zicl_Obj* obj = Zicl_NewObj(matd_ObjectVTable, sizeof(matd_t*), &body);
+        Zicl_Obj* obj = Zicl_NewObj(matd_VTable, sizeof(matd_t*), &body);
         if (obj == NULL) folkZiclAssert(ZICL_OOM);
         *(matd_t**) body = $rvalue;
         $robj = Zicl_BoxObject(obj);

@@ -89,6 +89,7 @@ When the GPU library is /gpuLib/ &\
 
     gpuc::addcode {
         typedef struct GpuCanvas {
+            Zicl_CapHead head;
             VkExtent2D extent;
 
             GpuTextureHandle gpuTexture;
@@ -96,6 +97,46 @@ When the GPU library is /gpuLib/ &\
 
             VkFence inFlightFence;
         } GpuCanvas;
+    } :extend
+    gpuc::objtype GpuCanvas {
+        static void GpuCanvas_deinitBody(Zicl_CapHead* head) {
+            GpuCanvas* wi = Zicl_ContainerOf(head, GpuCanvas, head);
+            freeGpuTexture(wi->gpuTexture);
+            vkDestroyFramebuffer(device, wi->framebuffer, NULL);
+            vkDestroyFence(device, wi->inFlightFence, NULL);
+        }
+
+        static void GpuCanvas_destroyBacking(Zicl_CapHead* head) {
+            free(Zicl_ContainerOf(head, GpuCanvas, head));
+        }
+
+        static const Zicl_CapHeadVTable GpuCanvas_vtable = {
+            .name = "gpu-canvas",
+            .deinit_body = GpuCanvas_deinitBody,
+            .destroy_backing = GpuCanvas_destroyBacking,
+        };
+        const Zicl_CapHeadVTable* GpuCanvas_VTable = &GpuCanvas_vtable;
+
+        static inline GpuCanvas* GpuCanvas_unwrap(Zicl_Interp* interp, Zicl_Shim* shim) {
+            Zicl_CapHead* head = NULL;
+            __ENSURE_OK(Zicl_ResolveCap(interp, shim, GpuCanvas_VTable, &head));
+            __capCleanupDefer(head);
+            return Zicl_ContainerOf(head, GpuCanvas, head);
+        }
+
+        static inline Zicl_Val GpuCanvas_wrap(GpuCanvas* wi) {
+            memset(&wi->head, 0, sizeof(wi->head));
+            wi->head.vtable = GpuCanvas_VTable;
+            Zicl_Val out;
+            folkZiclAssert(Zicl_CapNew(&wi->head, &out));
+            return out;
+        }
+    }
+    gpuc::argtype GpuCanvas* {
+        GpuCanvas* $argname = GpuCanvas_unwrap(interp, $shim);
+    }
+    gpuc::rtype GpuCanvas* {
+        $robj = GpuCanvas_wrap($rvalue);
     }
     gpuc::proc gpuTexture {GpuCanvas* wi} GpuTextureHandle {
         return wi->gpuTexture;
@@ -135,10 +176,7 @@ When the GPU library is /gpuLib/ &\
         return wi;
     }
     gpuc::proc destroy {GpuCanvas* wi} void {
-        freeGpuTexture(wi->gpuTexture);
-        vkDestroyFramebuffer(device, wi->framebuffer, NULL);
-        vkDestroyFence(device, wi->inFlightFence, NULL);
-        free(wi);
+        Zicl_CapClose(&wi->head);
     }
     gpuc::addcode {
         __thread GpuCanvas* boundCanvas;

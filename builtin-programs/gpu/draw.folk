@@ -60,6 +60,7 @@ fn vktry {call} { string map {\n " "} [csubst {{
 
 cc::addcode [subst {
     typedef struct DisplayState {
+        Zicl_CapHead head;
         VkSurfaceKHR surface;
         VkSwapchainKHR swapchain;
         uint32_t swapchainImageCount;
@@ -83,7 +84,43 @@ cc::addcode [subst {
     static VkDescriptorSet boundDescriptorSet;
 }]
 
-cc::addcap DisplayState /display-state
+cc::objtype DisplayState {
+    static void DisplayState_deinitBody(Zicl_CapHead* head) {
+        (void)head;
+    }
+
+    static void DisplayState_destroyBacking(Zicl_CapHead* head) {
+        free(Zicl_ContainerOf(head, DisplayState, head));
+    }
+
+    static const Zicl_CapHeadVTable DisplayState_vtable = {
+        .name = "display-state",
+        .deinit_body = DisplayState_deinitBody,
+        .destroy_backing = DisplayState_destroyBacking,
+    };
+    const Zicl_CapHeadVTable* DisplayState_VTable = &DisplayState_vtable;
+
+    static inline DisplayState* DisplayState_unwrap(Zicl_Interp* interp, Zicl_Shim* shim) {
+        Zicl_CapHead* head = NULL;
+        __ENSURE_OK(Zicl_ResolveCap(interp, shim, DisplayState_VTable, &head));
+        __capCleanupDefer(head);
+        return Zicl_ContainerOf(head, DisplayState, head);
+    }
+
+    static inline Zicl_Val DisplayState_wrap(DisplayState* ds) {
+        memset(&ds->head, 0, sizeof(ds->head));
+        ds->head.vtable = DisplayState_VTable;
+        Zicl_Val out;
+        folkZiclAssert(Zicl_CapNew(&ds->head, &out));
+        return out;
+    }
+}
+cc::argtype DisplayState* {
+    DisplayState* $argname = DisplayState_unwrap(interp, $shim);
+}
+cc::rtype DisplayState* {
+    $robj = DisplayState_wrap($rvalue);
+}
 
 cc::proc initDisplay {char* display uint32_t width uint32_t height uint32_t refreshRate} DisplayState* {
     volkInitialize();

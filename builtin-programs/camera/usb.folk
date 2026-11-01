@@ -23,17 +23,58 @@ camc::include <unistd.h>
 camc::include <stdint.h>
 camc::include <stdlib.h>
 
-camc::struct CameraBuffer {
-    uint8_t* start;
-    size_t length;
+camc::addcode {
+    typedef struct CameraBuffer {
+        uint8_t* start;
+        size_t length;
+    } CameraBuffer;
+
+    typedef struct Camera {
+        Zicl_CapHead capHead;
+        int fd;
+        uint32_t width;
+        uint32_t height;
+        size_t buffer_count;
+        CameraBuffer* buffers;
+        CameraBuffer head;
+    } Camera;
+} :extend
+camc::objtype Camera {
+    static void Camera_deinitBody(Zicl_CapHead* head) {
+        (void)head;
+    }
+
+    static void Camera_destroyBacking(Zicl_CapHead* head) {
+        free(Zicl_ContainerOf(head, Camera, capHead));
+    }
+
+    static const Zicl_CapHeadVTable Camera_vtable = {
+        .name = "camera",
+        .deinit_body = Camera_deinitBody,
+        .destroy_backing = Camera_destroyBacking,
+    };
+    const Zicl_CapHeadVTable* Camera_VTable = &Camera_vtable;
+
+    static inline Camera* Camera_unwrap(Zicl_Interp* interp, Zicl_Shim* shim) {
+        Zicl_CapHead* head = NULL;
+        __ENSURE_OK(Zicl_ResolveCap(interp, shim, Camera_VTable, &head));
+        __capCleanupDefer(head);
+        return Zicl_ContainerOf(head, Camera, capHead);
+    }
+
+    static inline Zicl_Val Camera_wrap(Camera* cam) {
+        memset(&cam->capHead, 0, sizeof(cam->capHead));
+        cam->capHead.vtable = Camera_VTable;
+        Zicl_Val out;
+        folkZiclAssert(Zicl_CapNew(&cam->capHead, &out));
+        return out;
+    }
 }
-camc::struct Camera {
-    int fd;
-    uint32_t width;
-    uint32_t height;
-    size_t buffer_count;
-    CameraBuffer* buffers;
-    CameraBuffer head;
+camc::argtype Camera* {
+    Camera* $argname = Camera_unwrap(interp, $shim);
+}
+camc::rtype Camera* {
+    $robj = Camera_wrap($rvalue);
 }
 
 camc::addcode {
@@ -78,7 +119,7 @@ camc::proc cameraClose {Camera* camera} void {
             fprintf(stderr, "cameraClose (%p): ENODEV, returning.\n",
                     camera);
             close(camera->fd);
-            free(camera);
+            Zicl_CapClose(&camera->capHead);
             return;
         } else {
             // stop, something weird happened.
@@ -98,7 +139,7 @@ camc::proc cameraClose {Camera* camera} void {
     if (close(camera->fd) != 0) {
         quit("close");
     }
-    free(camera);
+    Zicl_CapClose(&camera->capHead);
 }
 
 camc::proc cameraInit {Camera* camera uint32_t requested_buffer_count} void {
@@ -213,7 +254,7 @@ camc::addcode {
     }
 }
 
-camc::proc cameraFrameJpeg {Camera* camera} CameraBuffer {
+camc::proc cameraFrameJpeg {Camera* camera} BufferCap* {
     // Retry select() up to 5 times with 2 second timeout each
     // Some cameras need time to start streaming
     int r = 0;
@@ -239,15 +280,12 @@ camc::proc cameraFrameJpeg {Camera* camera} CameraBuffer {
 
     // Clone the head buffer into a new independent buffer that can be
     // owned by the caller.
-    CameraBuffer buf = {
-        .start = malloc(camera->head.length),
-        .length = camera->head.length
-    };
-    memcpy(buf.start, camera->head.start, buf.length);
+    BufferCap* buf = bufferCapNew(camera->head.length);
+    memcpy(buf->data, camera->head.start, buf->size);
     return buf;
 }
-camc::proc jpegFree {CameraBuffer jpeg} void {
-    free(jpeg.start);
+camc::proc jpegFree {BufferCap* jpeg} void {
+    Zicl_CapClose(&jpeg->head);
 }
 
 camc::proc setExposure {Camera* camera int value} void {
@@ -315,7 +353,7 @@ When /someone/ wishes $thisNode uses camera /camera/ with /...options/ {
         camLib::cameraStart $camObj
         # skip 5 frames for booting a cam
         for {set i 0} {$i < 5} {incr i} {
-            camLib::cameraFrameJpeg $camObj
+            close [camLib::cameraFrameJpeg $camObj]
         }
 
         if {[info exists crops]} {

@@ -22,7 +22,6 @@ When the GPU library is /gpuLib/ & the image library is /imageLib/ &\
     cc::typedef {struct PushConstantsEncoder} PushConstantsEncoder
     cc::typedef {struct Pipeline} Pipeline
     cc::typedef {struct VmaAllocation_T*} VmaAllocation
-    cc::addcap VmaAllocation /vma-allocation -exact
     cc::extend $gpuLib
     cc::extend $imageLib
     cc::extend $gpuTextureLib

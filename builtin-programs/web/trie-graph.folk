@@ -4,7 +4,6 @@ set trieLib [apply [fn {} {
     cc::include <stdlib.h>
     cc::include <string.h>
     cc::include "trie.h"
-    cc::addcap Trie /trie-pointer
     cc::addcode {
         typedef struct Db Db;
         extern Db* db;
@@ -60,6 +59,63 @@ void tfree(void *ptr) {
             return list;
         }
     }
+    cc::objtype Trie {
+        typedef struct TrieCap {
+            Zicl_CapHead head;
+            Trie* trie;
+        } TrieCap;
+
+        static void trieFree(Trie* trie) {
+            if (trie == NULL) return;
+            for (int i = 0; i < trie->branchesCount; i++) {
+                if (trie->branches[i] != NULL) {
+                    trieFree((Trie*)trie->branches[i]);
+                }
+            }
+            if (Zicl_AsObj(trie->key)) trieRetireObj(Zicl_AsObj(trie->key));
+            tfree(trie);
+        }
+
+        static void Trie_deinitBody(Zicl_CapHead* head) {
+            TrieCap* cap = Zicl_ContainerOf(head, TrieCap, head);
+            trieFree(cap->trie);
+            cap->trie = NULL;
+        }
+
+        static void Trie_destroyBacking(Zicl_CapHead* head) {
+            free(Zicl_ContainerOf(head, TrieCap, head));
+        }
+
+        static const Zicl_CapHeadVTable Trie_vtable = {
+            .name = "trie-pointer",
+            .deinit_body = Trie_deinitBody,
+            .destroy_backing = Trie_destroyBacking,
+        };
+        const Zicl_CapHeadVTable* Trie_VTable = &Trie_vtable;
+
+        static inline TrieCap* Trie_resolve(Zicl_Interp* interp, Zicl_Shim* shim) {
+            Zicl_CapHead* head = NULL;
+            __ENSURE_OK(Zicl_ResolveCap(interp, shim, Trie_VTable, &head));
+            __capCleanupDefer(head);
+            return Zicl_ContainerOf(head, TrieCap, head);
+        }
+
+        static inline Zicl_Val Trie_wrap(Trie* trie) {
+            TrieCap* cap = (TrieCap*) malloc(sizeof(TrieCap));
+            memset(&cap->head, 0, sizeof(cap->head));
+            cap->head.vtable = Trie_VTable;
+            cap->trie = trie;
+            Zicl_Val out;
+            folkZiclAssert(Zicl_CapNew(&cap->head, &out));
+            return out;
+        }
+    }
+    cc::argtype Trie* {
+        Trie* $argname = Trie_resolve(interp, $shim)->trie;
+    }
+    cc::rtype Trie* {
+        $robj = Trie_wrap($rvalue);
+    }
     cc::proc tclify {Trie* trie} Zicl_Val {
         int objc = 3 + trie->branchesCount;
         Zicl_Val objv[objc];
@@ -93,18 +149,20 @@ void tfree(void *ptr) {
         return (Trie *)trieNew();
     }
     cc::proc add {Zicl_Shim* trieShim Zicl_Val patternObj uint64_t value} Zicl_Val {
-        Trie* trie = Trie_unwrap(trieShim);
+        TrieCap* cap = Trie_resolve(interp, trieShim);
         Zicl_List* pattern = valueToClause(interp, patternObj);
-        const Trie* result = trieAdd(trie, &trieAllocator, pattern, value);
+        const Trie* result = trieAdd(cap->trie, &trieAllocator, pattern, value);
         Zicl_DropRefList(pattern);
-        if (result == trie) {
+        if (result == cap->trie) {
             // trieAdd is a no-op when the clause is already present (see its
             // own comment): the returned pointer is byte-identical to the
             // input, so propagate the input's capability instead of minting
             // a new, unrelated one.
             return Zicl_Ref(Zicl_Current(trieShim));
         }
-        return Trie_wrapFresh((Trie*)result);
+        cap->trie = NULL;
+        Zicl_CapClose(&cap->head);
+        return Trie_wrap((Trie*)result);
     }
     cc::proc lookup {Trie* trie Zicl_Val patternObj} Zicl_Val {
         uint64_t results[50];
@@ -121,14 +179,20 @@ void tfree(void *ptr) {
         for (int i = 0; i < resultCount; i++) Zicl_DropRef(resultObjs[i]);
         return result;
     }
-    cc::proc remove_ {Trie* trie Zicl_Val patternObj} Trie* {
+    cc::proc remove_ {Zicl_Shim* trieShim Zicl_Val patternObj} Zicl_Val {
+        TrieCap* cap = Trie_resolve(interp, trieShim);
         uint64_t results[50];
         Zicl_List* pattern = valueToClause(interp, patternObj);
         int resultCount;
-        trie = (Trie *)trieRemove(trie, &trieAllocator,
-                                  pattern, results, 50, &resultCount);
+        const Trie* result = trieRemove(cap->trie, &trieAllocator,
+                                        pattern, results, 50, &resultCount);
         Zicl_DropRefList(pattern);
-        return trie;
+        if (result == cap->trie) {
+            return Zicl_Ref(Zicl_Current(trieShim));
+        }
+        cap->trie = NULL;
+        Zicl_CapClose(&cap->head);
+        return Trie_wrap((Trie*)result);
     }
 
     return [cc::compile]

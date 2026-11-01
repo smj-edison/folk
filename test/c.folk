@@ -15,7 +15,22 @@ set dlib [dd::compile]
 
 assert {[dlib::super_addify 10 1] == 1100}
 
-# Verify urlsegment is required for addcap
-assert {[catch {cc::addcap IncompleteType ""}] != 0}
+# Verify BufferCap* capability round-trips and closes cleanly
+set bc [dict link $C {}]
+bc::proc makeBuf {int n int val} BufferCap* {
+    BufferCap* buf = bufferCapNew(n);
+    for (int i = 0; i < n; i++) buf->data[i] = (uint8_t)(val + i);
+    return buf;
+}
+bc::proc readBuf {BufferCap* buf int idx} int {
+    FOLK_ENSURE(idx >= 0 && (size_t)idx < buf->size);
+    return buf->data[idx];
+}
+set blib [bc::compile]
+set buf [blib::makeBuf 4 10]
+assert {[string match {<zicl://*/buffer/*>} $buf]}
+assert {[blib::readBuf $buf 2] == 12}
+close $buf
+assert {[catch {blib::readBuf $buf 0}] != 0}
 
 Exit! 0

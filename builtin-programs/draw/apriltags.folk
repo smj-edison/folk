@@ -34,8 +34,8 @@ When the image library is /imageLib/ & the print library is /printLib/ &\
     # 10x10 AprilTag -> 100 bits
     for {set y 0} {$y < 10} {incr y} {
         for {set x 0} {$x < 10} {incr x} {
-            set j [expr {$y * [imageLib::Image_bytesPerRow $tagImage] + $x}]
-            set bit $([imageLib::Image_data $tagImage $j] == 255)
+            set j [expr {$y * $tagImage::bytesPerRow + $x}]
+            set bit $([imageLib::data $tagImage $j] == 255)
             lappend tagBits $bit
         }
     }

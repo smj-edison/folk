@@ -107,6 +107,59 @@ Zicl_RetCode ziclDictGetLongNoFollow(Zicl_Interp *interp, const Zicl_Dict *dict,
     return Zicl_GetLong(interp, &shim, out);
 }
 
+Zicl_RetCode ziclShimDictGetInt(Zicl_Interp *interp, Zicl_Shim *dictShim, const char *key, int *out) {
+    Zicl_OptVal opt;
+    Zicl_RetCode rc = Zicl_ShimDictGet(interp, dictShim, Zicl_InternStr(key), &opt);
+    if (rc != ZICL_OK) return rc;
+    if (!Zicl_IsSome(opt)) return ZICL_ERR;
+    Zicl_Shim valShim = Zicl_NewShim(Zicl_Unwrap(opt));
+    defer { Zicl_ShimDiscardChanges(&valShim); }
+    return Zicl_GetInt(interp, &valShim, out);
+}
+
+Zicl_RetCode ziclShimDictGetLong(Zicl_Interp *interp, Zicl_Shim *dictShim, const char *key, long *out) {
+    Zicl_OptVal opt;
+    Zicl_RetCode rc = Zicl_ShimDictGet(interp, dictShim, Zicl_InternStr(key), &opt);
+    if (rc != ZICL_OK) return rc;
+    if (!Zicl_IsSome(opt)) return ZICL_ERR;
+    Zicl_Shim valShim = Zicl_NewShim(Zicl_Unwrap(opt));
+    defer { Zicl_ShimDiscardChanges(&valShim); }
+    return Zicl_GetLong(interp, &valShim, out);
+}
+
 void ziclDictRemove(Zicl_Dict *dict, const char *key) {
     folkZiclAssert(Zicl_DictRemove(dict, Zicl_InternStr(key), NULL));
+}
+
+static void bufferCapDeinitBody(Zicl_CapHead *head) {
+    BufferCap *buf = Zicl_ContainerOf(head, BufferCap, head);
+    free(buf->data);
+    buf->data = NULL;
+    buf->size = 0;
+}
+
+static void bufferCapDestroyBacking(Zicl_CapHead *head) {
+    free(Zicl_ContainerOf(head, BufferCap, head));
+}
+
+const Zicl_CapHeadVTable BufferCapVTable = {
+    .name = "buffer",
+    .deinit_body = bufferCapDeinitBody,
+    .destroy_backing = bufferCapDestroyBacking,
+};
+
+BufferCap *bufferCapNewFromPtr(uint8_t *data, size_t size) {
+    BufferCap *buf = (BufferCap *)malloc(sizeof(BufferCap));
+    if (!buf) folkZiclAssert(ZICL_OOM);
+    buf->head = (Zicl_CapHead){ .vtable = &BufferCapVTable };
+    buf->size = size;
+    buf->data = data;
+    folkZiclAssert(Zicl_CapRegister(&buf->head));
+    return buf;
+}
+
+BufferCap *bufferCapNew(size_t size) {
+    uint8_t *data = (uint8_t *)malloc(size);
+    if (!data && size > 0) folkZiclAssert(ZICL_OOM);
+    return bufferCapNewFromPtr(data, size);
 }

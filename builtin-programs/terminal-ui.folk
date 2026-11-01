@@ -96,7 +96,7 @@ while true {
         lappend lines $line
     }
     if {[llength $lines] > $maxLines} {
-        set lines [lrange $lines 0 $maxLines-1]
+        set lines [lrange $lines 0 $($maxLines-1)]
     }
 
     if {$prevLineCount > 0} {
