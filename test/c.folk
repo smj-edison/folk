@@ -15,14 +15,14 @@ set dlib [dd::compile]
 
 assert {[dlib::super_addify 10 1] == 1100}
 
-# Verify BufferCap* capability round-trips and closes cleanly
+# Verify Buffer* capability round-trips and closes cleanly
 set bc [dict link $C {}]
-bc::proc makeBuf {int n int val} BufferCap* {
-    BufferCap* buf = bufferCapNew(n);
+bc::proc makeBuf {int n int val} Buffer* {
+    Buffer* buf = bufferNew(n);
     for (int i = 0; i < n; i++) buf->data[i] = (uint8_t)(val + i);
     return buf;
 }
-bc::proc readBuf {BufferCap* buf int idx} int {
+bc::proc readBuf {Buffer* buf int idx} int {
     FOLK_ENSURE(idx >= 0 && (size_t)idx < buf->size);
     return buf->data[idx];
 }

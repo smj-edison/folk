@@ -137,20 +137,6 @@ set C {
         #define __ENSURE(EXPR) if (!(EXPR)) { Zicl_SetErrorString(interp, "failed to convert argument from Tcl to C in: " #EXPR, -1); longjmp(__onError, 0); }
         #define __ENSURE_OK(EXPR) if ((EXPR) != ZICL_OK) { longjmp(__onError, 0); }
 
-        static inline BufferCap* BufferCap_unwrap(Zicl_Interp* interp, Zicl_Shim* shim) {
-            Zicl_CapHead* head = NULL;
-            __ENSURE_OK(Zicl_ResolveCap(interp, shim, &BufferCapVTable, &head));
-            __capCleanupDefer(head);
-            return Zicl_ContainerOf(head, BufferCap, head);
-        }
-
-        static inline Zicl_Val BufferCap_wrap(BufferCap* buf) {
-            Zicl_Val out;
-            folkZiclAssert(Zicl_BoxCap(&buf->head, &out));
-            Zicl_CapDropRef(&buf->head);
-            return out;
-        }
-
         #define FOLK_ERROR(...) do { \
             char __msg[1024]; snprintf(__msg, 1024, ##__VA_ARGS__); \
             Zicl_SetErrorString(interp, __msg, -1); \
@@ -197,7 +183,6 @@ set C {
         char* {identity { char* $argname = (char*) ziclShimString($shim); } }
         Zicl_Val {identity { Zicl_Val $argname = Zicl_Current($shim); }}
         Zicl_Shim* {identity { Zicl_Shim* $argname = $shim; }}
-        BufferCap* {identity { BufferCap* $argname = BufferCap_unwrap(interp, $shim); }}
         default {
             if {[string index $argtype end] eq "*"} {
                 identity {
@@ -279,7 +264,6 @@ set C {
         intptr_t {identity { $robj = Zicl_NewLong($rvalue); }}
         char* {identity { $robj = ziclNewString($rvalue, -1); } }
         Zicl_Val {identity { $robj = $rvalue; }}
-        BufferCap* {identity { $robj = BufferCap_wrap($rvalue); }}
         default {
             if {[string index $rtype end] eq "*"} {
                 identity { folkZiclAssert(Zicl_NewStringFormatted(&$robj, "($rtype) 0x%" PRIxPTR, (uintptr_t) $rvalue)); }
@@ -864,6 +848,8 @@ method C::extend {self args} {
         if {![dict exists $self::objtypes $objtype]} {
             dict set self::objtypes $objtype $code
             dict set self::extendedObjtypes $objtype $srcCap
+        } elseif {![dict exists $self::extendedObjtypes $objtype]} {
+            dict set self::extendedObjtypes $objtype $srcCap
         }
     }
 
@@ -888,6 +874,73 @@ method C::extend {self args} {
         self::addcode "void (*${srcid}_register)(Zicl_Interp*) = (void (*)(Zicl_Interp*)) ${addr}UL;"
         lappend self::extends $srcid
     }
+}
+
+C::addcode {
+    typedef struct Buffer {
+        Zicl_CapHead head;
+        size_t size;
+        uint8_t *data;
+    } Buffer;
+} :extend
+
+C::objtype Buffer {
+    extern const Zicl_CapHeadVTable* Buffer_VTable;
+
+    static void Buffer_deinitBody(Zicl_CapHead* head) {
+        Buffer* buf = Zicl_ContainerOf(head, Buffer, head);
+        free(buf->data);
+        buf->data = NULL;
+        buf->size = 0;
+    }
+
+    static void Buffer_destroyBacking(Zicl_CapHead* head) {
+        free(Zicl_ContainerOf(head, Buffer, head));
+    }
+
+    static const Zicl_CapHeadVTable Buffer_vtable = {
+        .name = "buffer",
+        .deinit_body = Buffer_deinitBody,
+        .destroy_backing = Buffer_destroyBacking,
+    };
+    const Zicl_CapHeadVTable* Buffer_VTable = &Buffer_vtable;
+
+    static inline Buffer* Buffer_unwrap(Zicl_Interp* interp, Zicl_Shim* shim) {
+        Zicl_CapHead* head = NULL;
+        __ENSURE_OK(Zicl_ResolveCap(interp, shim, Buffer_VTable, &head));
+        __capCleanupDefer(head);
+        return Zicl_ContainerOf(head, Buffer, head);
+    }
+
+    static inline Zicl_Val Buffer_wrap(Buffer* buf) {
+        Zicl_Val out;
+        folkZiclAssert(Zicl_BoxCap(&buf->head, &out));
+        Zicl_CapDropRef(&buf->head);
+        return out;
+    }
+
+    static inline Buffer* bufferNewFromPtr(uint8_t* data, size_t size) {
+        Buffer* buf = (Buffer*)malloc(sizeof(Buffer));
+        if (!buf) folkZiclAssert(ZICL_OOM);
+        buf->head = (Zicl_CapHead){ .vtable = Buffer_VTable };
+        buf->size = size;
+        buf->data = data;
+        folkZiclAssert(Zicl_CapRegister(&buf->head));
+        return buf;
+    }
+
+    static inline Buffer* bufferNew(size_t size) {
+        uint8_t* data = (uint8_t*)malloc(size);
+        if (!data && size > 0) folkZiclAssert(ZICL_OOM);
+        return bufferNewFromPtr(data, size);
+    }
+}
+
+C::argtype Buffer* {
+    Buffer* $argname = Buffer_unwrap(interp, $shim);
+}
+C::rtype Buffer* {
+    $robj = Buffer_wrap($rvalue);
 }
 
 # A C++ flavor of a C prototype. Defaults to the base `$C`, but takes any

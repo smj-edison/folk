@@ -5,7 +5,7 @@ cc::addendcflags -lturbojpeg
 cc::include <stdlib.h>
 cc::include <string.h>
 
-cc::typedef BufferCap* Jpeg
+cc::typedef Buffer* Jpeg
 
 cc::addcode {
     #undef EXTERN
@@ -236,7 +236,7 @@ cc::proc jpegSubimage {Jpeg jpeg double x double y double subwidth double subhei
 
     tjDestroy(handle);
 
-    return bufferCapNewFromPtr(outBuf, outSize);
+    return bufferNewFromPtr(outBuf, outSize);
 }
 
 cc::proc jpegDecompressGray {Jpeg jpeg int width int height int uniq} Image {

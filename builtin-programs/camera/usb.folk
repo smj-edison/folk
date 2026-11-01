@@ -254,7 +254,7 @@ camc::addcode {
     }
 }
 
-camc::proc cameraFrameJpeg {Camera* camera} BufferCap* {
+camc::proc cameraFrameJpeg {Camera* camera} Buffer* {
     // Retry select() up to 5 times with 2 second timeout each
     // Some cameras need time to start streaming
     int r = 0;
@@ -280,11 +280,11 @@ camc::proc cameraFrameJpeg {Camera* camera} BufferCap* {
 
     // Clone the head buffer into a new independent buffer that can be
     // owned by the caller.
-    BufferCap* buf = bufferCapNew(camera->head.length);
+    Buffer* buf = bufferNew(camera->head.length);
     memcpy(buf->data, camera->head.start, buf->size);
     return buf;
 }
-camc::proc jpegFree {BufferCap* jpeg} void {
+camc::proc jpegFree {Buffer* jpeg} void {
     Zicl_CapClose(&jpeg->head);
 }
 

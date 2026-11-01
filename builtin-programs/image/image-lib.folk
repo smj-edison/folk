@@ -5,7 +5,7 @@ cc::include <math.h>
 
 cc::addcode {
     typedef struct Image {
-        // Pointer to the BufferCap capability head managing `data` (or NULL before
+        // Pointer to the Buffer capability head managing `data` (or NULL before
         // a raw C-allocated buffer is wrapped into an Image Zicl_Obj).
         Zicl_CapHead *cap;
         uint32_t index;
@@ -82,7 +82,7 @@ cc::objtype Image {
         defer { Zicl_ShimDiscardChanges(&capShim); }
 
         Zicl_CapHead* head = NULL;
-        ZICL_TRY(Zicl_ResolveCap(interp, &capShim, &BufferCapVTable, &head), rc);
+        ZICL_TRY(Zicl_ResolveCap(interp, &capShim, Buffer_VTable, &head), rc);
         defer { if (head) Zicl_CapDropInFlight(head); }
 
         long index, width, height, components, bytesPerRow, uniq;
@@ -101,7 +101,7 @@ cc::objtype Image {
             Zicl_SetErrorString(interp, "Image width * components exceeds bytesPerRow", -1);
             return ZICL_ERR;
         }
-        BufferCap* buf = Zicl_ContainerOf(head, BufferCap, head);
+        Buffer* buf = Zicl_ContainerOf(head, Buffer, head);
         size_t requiredEnd = (size_t)index;
         if (height > 0 && width > 0 && components > 0) {
             requiredEnd += (size_t)(height - 1) * (size_t)bytesPerRow + (size_t)width * (size_t)components;
@@ -151,7 +151,7 @@ cc::objtype Image {
         __ENSURE_OK(Image_shimmerFrom(interp, shim, &imPtr));
         __ENSURE_OK(Zicl_CapMarkInFlight(interp, imPtr->cap));
         __capCleanupDefer(imPtr->cap);
-        BufferCap* buf = Zicl_ContainerOf(imPtr->cap, BufferCap, head);
+        Buffer* buf = Zicl_ContainerOf(imPtr->cap, Buffer, head);
         Image im = *imPtr;
         im.data = buf->data + im.index;
         return im;
@@ -159,7 +159,7 @@ cc::objtype Image {
 
     static inline Zicl_Val Image_wrap(Image im) {
         if (im.cap == NULL) {
-            BufferCap* buf = bufferCapNewFromPtr(im.data, (size_t)im.height * im.bytesPerRow);
+            Buffer* buf = bufferNewFromPtr(im.data, (size_t)im.height * im.bytesPerRow);
             im.cap = &buf->head;
             im.index = 0;
         } else {
